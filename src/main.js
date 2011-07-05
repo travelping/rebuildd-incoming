@@ -96,7 +96,8 @@ function usage(exitStatus) {
   console.log('  --input-dir <Directory>  -- watch for packages in <Directory> (defaults to the current directory)');
   console.log('  --host <Host>            -- connect to rebuildd on <Host> (defaults to 127.0.0.1)');
   console.log('  --port <Port>            -- assume rebuildd is listening on <Port> (defaults to 9999)');
-  console.log('  --[no-]queue             -- if true, packages are submitted to the rebuildd queue');
+  console.log('  --priority (high | low)  -- if specified, enqueue packages with the given priority (defaults to high)');
+  console.log('  --[no-]queue             -- if true, packages are submitted to the rebuildd queue (defaults to false)');
   console.log('  --help, -h               -- show usage');
   process.exit(exitStatus);
 }
