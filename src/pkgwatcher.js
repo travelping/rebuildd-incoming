@@ -36,7 +36,7 @@ function handleFSEvent (event, inputDir, outputDir, emitter) {
 
     switch (Path.extname(name)) {
       case '.dsc':
-	changesFileComponents(inputDir, path, function (comps) {
+	dscFileComponents(inputDir, path, function (comps) {
 	  currentPackages[name] = comps;
           processPackages(inputDir, outputDir, currentPackages, emitter);
         });
@@ -91,20 +91,16 @@ function completedPackages (dir, packages, callback) {
   callback(ready);
 }
 
-function changesFileComponents (dir, file, callback) {
+function dscFileComponents (dir, file, callback) {
   FS.readFile(file, 'utf8', function (err, content) {
     if (err) throw err;
 
+    Path.basename(file).match(/^([^_]+)_(.*)\.dsc$/);
+    var pkgObj = { files: [], packageName: RegExp['$1'], version: RegExp['$2'] };
     var lines = content.split('\n');
     var inFileSection = false;
-    var pkgObj = { files: [] };
+
     lines.forEach(function (line) {
-      if (line.match(/^Source: (.+) *$/)) {
-        pkgObj['packageName'] = RegExp['$1'];
-      }
-      if (line.match(/^Version: ([0-9]+:)?(.+) *$/) && (!pkgObj['version'])) {
-        pkgObj['version'] = RegExp['$2'];
-      }
       if (line.match(/^Files: *$/)) {
 	inFileSection = true;
       }
