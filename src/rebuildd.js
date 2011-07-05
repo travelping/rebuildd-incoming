@@ -2,15 +2,17 @@ var Net = require('net');
 
 exports.queuePackage = function (pkgname, version, options, callback) {
   var priority = options['priority'] || 'high';
-  var socket   = Net.createConnection(options.port, options.host);
+  var socket   = new Net.Socket();
   var netError = null;
 
   socket.on('connect', function () {
+    socket.setNoDelay();
     options.distributions.forEach(function (dist) {
       line = ['job', 'add', pkgname, version, priority, dist].join(' ');
       socket.write(line + '\n');
     });
-    socket.end('job reload\n');
+    socket.write('job reload\n');
+    socket.destroy();
   });
 
   socket.on('error', function (exn) {
@@ -24,4 +26,6 @@ exports.queuePackage = function (pkgname, version, options, callback) {
       callback(false, null);
     }
   });
+
+  socket.connect(options.port, options.host);
 }
