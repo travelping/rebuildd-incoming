@@ -1,0 +1,11 @@
+{
+  "author": "Felix Lange <fl@travelping.com>",
+  "name": "rebuildd-incoming",
+  "version": "0.0.1",
+  "bin": { "rebuildd-incoming": "./cli.js" },
+  "engines": { "node": "0.4.x" },
+  "dependencies": {
+    "inotify": "0.1.x",
+    "nopt": "1.0.x"
+  }
+}
