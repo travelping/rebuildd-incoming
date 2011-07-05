@@ -3,18 +3,37 @@ var Nopt = require('nopt'),
     PkgWatcher = require(__dirname + '/pkgwatcher.js'),
     Rebuildd = require(__dirname + '/rebuildd.js');
 
-var knownOptions = { 'input-dir': Path,
-                     'output-dir': Path,
-                     'dists': String,
-                     'dont-queue': Boolean,
-                     'help': Boolean
-                   };
+Nopt.typeDefs['PosInteger'] = {
+  type: 'PosInteger',
+  validate: function (data, key, val) {
+    var i = parseInt(val);
+    if (i == Nan || i <= 0) {
+      return false;
+    } else {
+      data[key] = i;
+    }
+  }
+};
+
+var knownOptions = {
+  'input-dir': Path,
+  'output-dir': Path,
+  'host': String,
+  'port': 'PosInteger',
+  'priority': ['high', 'low'],
+  'dists': String,
+  'queue': Boolean,
+  'help': Boolean
+};
 var shortcuts = { 'h': ['--help'] };
 
 exports.main = function () {
   var options = Nopt(options, {}, process.argv, 2),
       inputDir = (options['input-dir'] && Path.resolve(options['input-dir'])) || Path.resolve('.'),
       outputDir = options['output-dir'] && Path.resolve(options['output-dir']),
+      host = options['host'] || '127.0.0.1';
+      port = options['port'] || '9999';
+      priority = options['priority'] || 'high';
       dists = [];
 
   if (options.help) {
@@ -31,19 +50,6 @@ exports.main = function () {
     }
   }
 
-  if (!options['dists']) {
-    console.log('Error: --dists is required');
-    usage(1);
-  }
-
-  if (options.dists == '') {
-    console.log('Error: Argument to --dists must not be empty');
-    usage(1);
-  } else {
-    dists = options.dists.split(' ');
-    console.log('Distributions: ', dists);
-  }
-
   if (!Path.existsSync(inputDir)) {
     console.log('Error: Input Directory ' + inputDir + ' does not exist.');
     process.exit(1);
@@ -54,21 +60,30 @@ exports.main = function () {
     process.exit(1);
   }
 
+  if (!options['dists']) {
+    console.log('Error: --dists is required');
+    usage(1);
+  } else {
+    dists = options.dists.split(' ');
+    console.log('Distributions: ', dists);
+  }
+
   /* If we're still alive, options should be correct' */
   console.log('Watching Directory: ' + inputDir);
   watcher = PkgWatcher.watchDir(inputDir, outputDir);
   watcher.on('package', function (pkg) {
     var pkgstr = pkg.packageName + ' ' + pkg.version;
-    if (options['dont-queue']) {
-      console.log('Would\'ve queued package ' + pkgstr);
-    } else {
-      Rebuildd.queuePackage(pkg.packageName, pkg.version, dists, function (error, code) {
+    if (options['queue']) {
+      rebuilddOpts = { host: host, port: port, priority: priority, distributions: dists };
+      Rebuildd.queuePackage(pkg.packageName, pkg.version, rebuilddOpts, function (error, msg) {
         if (error) {
-	  console.log('Error (' + code + ') queueing package: ' + pkgstr);
+	  console.log('Could not queue package ' + pkgstr + ': ' + msg);
         } else {
           console.log('Queued package: ' + pkgstr);
         }
       });
+    } else {
+      console.log('Would\'ve queued package ' + pkgstr);
     }
   });
 }
@@ -78,8 +93,10 @@ function usage(exitStatus) {
   console.log('Options:');
   console.log('  --dists <Distributions>  -- (required) space-separated list of distributions');
   console.log('  --output-dir <OutDir>    -- (required) move uploaded packages to <OutDir>');
-  console.log('  --input-dir <Directory>  -- watch for packages in <Directory> (defaults to cwd)');
-  console.log('  --dont-queue             -- don\'t submit to rebuildd, just print');
+  console.log('  --input-dir <Directory>  -- watch for packages in <Directory> (defaults to the current directory)');
+  console.log('  --host <Host>            -- connect to rebuildd on <Host> (defaults to 127.0.0.1)');
+  console.log('  --port <Port>            -- assume rebuildd is listening on <Port> (defaults to 9999)');
+  console.log('  --[no-]queue             -- if true, packages are submitted to the rebuildd queue');
   console.log('  --help, -h               -- show usage');
   process.exit(exitStatus);
 }

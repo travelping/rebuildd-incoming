@@ -1,21 +1,27 @@
-var ChildProcess = require('child_process');
+var Net = require('net');
 
-exports.queuePackage = function (pkgname, version, distributions, callback) {
-  var priority = 'high';
-  var proc     = ChildProcess.spawn('rebuildd-job', ['add']);
+exports.queuePackage = function (pkgname, version, options, callback) {
+  var priority = options['priority'] || 'high';
+  var socket   = Net.createConnection(options.port, options.host);
+  var netError = null;
 
-  distributions.forEach(function (dist) {
-    line = [pkgname, version, priority, dist].join(' ');
-    proc.stdin.write(line + '\n');
+  socket.on('connect', function () {
+    options.distributions.forEach(function (dist) {
+      line = ['job', 'add', pkgname, version, priority, dist].join(' ');
+      socket.write(line + '\n');
+    });
+    socket.end('job reload\n');
   });
 
-  proc.on('exit', function (code) {
-    if (code == 0) {
-      callback(false, 0);
+  socket.on('error', function (exn) {
+    netError = '' + exn;
+  })
+
+  socket.on('close', function (had_error) {
+    if (had_error) {
+      callback(true, netError);
     } else {
-      callback(true, code);
+      callback(false, null);
     }
   });
-
-  proc.stdin.end();
 }
