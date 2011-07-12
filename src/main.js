@@ -69,19 +69,17 @@ exports.main = function () {
   }
 
   /* If we're still alive, options should be correct' */
-  console.log('Watching Directory: ' + inputDir);
-  watcher = PkgWatcher.watchDir(inputDir, outputDir);
+  console.log('Watching Directory:', inputDir);
+  var watcher = PkgWatcher.watchDir(inputDir, outputDir);
+
+  console.log('Connecting to rebuildd:', host + ':' + port);
+  var rebuildd = new Rebuildd.Server(host, port);
+
   watcher.on('package', function (pkg) {
     var pkgstr = pkg.packageName + ' ' + pkg.version;
     if (options['queue']) {
-      rebuilddOpts = { host: host, port: port, priority: priority, distributions: dists };
-      Rebuildd.queuePackage(pkg.packageName, pkg.version, rebuilddOpts, function (error, msg) {
-        if (error) {
-	  console.log('Could not queue package ' + pkgstr + ': ' + msg);
-        } else {
-          console.log('Queued package: ' + pkgstr);
-        }
-      });
+      rebuilddOpts = { priority: priority, distributions: dists };
+      rebuildd.queuePackage(pkg.packageName, pkg.version, rebuilddOpts);
     } else {
       console.log('Would\'ve queued package ' + pkgstr);
     }
