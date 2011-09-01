@@ -46,6 +46,10 @@ function handleFSEvent (event, inputDir, outputDir, emitter) {
 	processPackages(inputDir, outputDir, currentPackages, emitter);
         break;
 
+      case '.bz2':
+	processPackages(inputDir, outputDir, currentPackages, emitter);
+        break;
+
       default:
         console.log('unknown file type (ignored): ' + Path.extname(name));
     }
