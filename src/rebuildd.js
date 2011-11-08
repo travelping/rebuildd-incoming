@@ -1,17 +1,41 @@
 var Net = require('net');
 
 exports.Server = function (host, port) {
-  this.socket   = Net.createConnection(port, host);
-  this.addQueue = [];
-  var netError;
+  this.host = host;
+  this.port = port;
+  this.reconnect();
+}
 
-  this.socket.on('data', function (data) {
+exports.Server.prototype.reconnect = function () {
+  var self = this;
+  if (self.socket != undefined) {
+    self.socket.destroy();
+  }
+
+  self.socket = Net.createConnection(self.port, self.host);
+  self.socket.setKeepAlive(true, 1000);
+
+  self.socket.on('connect', function() {
+    console.log('Connected');
+  });
+
+  self.socket.on('data', function (data) {
     var output = stripPrompt(data, "<< ");
     if (output != '') { console.log(output); }
   });
+  
+  self.socket.on('error', function (exn) {
+    console.log(exn);
+    setTimeout(self.reconnect(), 1000);
+  });
+  
+  self.socket.on('end', function() {
+    console.log('Connection lost');
+  });
 
-  this.socket.on('error', function (exn) {
-    console.log('' + exn);
+  self.socket.on('timeout', function() {
+    console.log('Timeout, reconnect in 1s');
+    setTimeout(self.reconnect(), 1000);
   });
 }
 
