@@ -3,6 +3,8 @@ var Net = require('net');
 exports.Server = function (host, port) {
   this.host = host;
   this.port = port;
+  this.queue = [];
+  this.lock = false;
   this.reconnect();
 }
 
@@ -16,7 +18,7 @@ exports.Server.prototype.reconnect = function () {
   self.socket.setKeepAlive(true, 1000);
 
   self.socket.on('connect', function() {
-    console.log('Connected');
+    console.log('Connected to rebuildd');
   });
 
   self.socket.on('data', function (data) {
@@ -30,11 +32,11 @@ exports.Server.prototype.reconnect = function () {
   });
   
   self.socket.on('end', function() {
-    console.log('Connection lost');
+    console.log('Connection to rebuildd closed');
   });
 
   self.socket.on('timeout', function() {
-    console.log('Timeout, reconnect in 1s');
+    console.log('rebuildd timeout, reconnect in 1s');
     setTimeout(self.reconnect(), 1000);
   });
 }
@@ -44,13 +46,22 @@ exports.Server.prototype.sendCmd = function (cmd) {
   this.socket.write(cmd + "\n");
 }
 
-exports.Server.prototype.queuePackage = function (pkgname, version, options) {
-  var server = this;
-  var priority = options['priority'] || 'high';
+exports.Server.prototype.queuePackage = function (name, version, dist, priority) {
+  this.queue.push({name: name, version: version, dist: dist, priority: priority});
+  if(this.lock) return;
+  this.addJob();
+}
 
-  slowForeach(500, options.distributions, function (dist) {
-    server.sendCmd(['job', 'add', pkgname, version, priority, dist].join(' '));
-  });
+exports.Server.prototype.addJob = function () {
+  if(this.queue.length == 0) {
+    this.lock = false;
+    return;
+  }
+  this.lock = true;
+  var pkg = this.queue.pop();
+  var server = this;
+  server.sendCmd(['job', 'add', pkg.name, pkg.version, pkg.priority, pkg.dist].join(' '));
+  setTimeout(function() { server.addJob(); }, 500);
 }
 
 function stripPrompt(data, prefix) {
@@ -66,11 +77,3 @@ function stripPrompt(data, prefix) {
   return lines.map(function (l) { return prefix + '"' + l + '"'; }).join("\n");
 }
 
-function slowForeach(delay, arr, callback) {
-  if (arr.length != 0) {
-    callback(arr[0]);
-    setTimeout(function () {
-       slowForeach(delay, arr.slice(1), callback);
-    }, delay);
-  }
-}
