@@ -46,10 +46,15 @@ exports.Builder.prototype.init = function (dep, dists, pkglist, callback) {
   var builder = this;
   
   console.log('Build init');
+  if(pkglist.length == 0) {
+    console.log('nothing to do');
+    callback(1, {});
+    return;
+  }
   if(builder.dists.length > 0) {
     var msg = 'already locked';
     console.log(msg);
-    callback(1, {message: msg});
+    callback(2, {message: msg});
     return;
   }
   builder.dists = dists;
@@ -62,7 +67,7 @@ exports.Builder.prototype.init = function (dep, dists, pkglist, callback) {
       builder.dists = [];
       console.log('Error: generating buildlist');
       console.log(error.message);
-      callback(2, error);
+      callback(3, error);
       return;
     }
     builder.preparePkgs(list, function(error, pkgs) {
@@ -70,17 +75,20 @@ exports.Builder.prototype.init = function (dep, dists, pkglist, callback) {
         builder.dists = [];
         console.log('Error: preparing packages');
         console.log(error.message);
-        callback(3, error);
+        callback(4, error);
         return;
       }
       console.log('dumping build list');
+      dists.push('tmp');
+      builder.queue['tmp'] = [];
       for(var i=pkgs.length-1; pkgs.length > 0; i--) {
         var pkg = pkgs.pop();
         console.log(i+':', pkg.name);
         dists.forEach(function(dist) {
-          builder.queue[dist].push(pkg);
+          builder.queue[dist].push(clone(pkg));
         });
       }
+      dists.pop();
       builder.start(dists);
       callback(0, {});
     });
@@ -99,6 +107,108 @@ exports.Builder.prototype.start = function (dists) {
       builder.rebuildd.queuePackage(pkg.name, pkg.version, dist, builder.priority);
     }
   });
+}
+
+exports.Builder.prototype.processBatch = function (type, dist, status) {
+  var builder = this;
+  var success = status == 0;
+  switch(builder.status[dist]) {
+    case undefined:
+      console.log('Error: No batch for', dist);
+      break;
+    case 0:
+      console.log('Error: Batch not started');
+      break;
+    case 1:
+      switch(type) {
+        case "build":
+          console.log('Build for', dist, success ? 'succeeded' : 'failed');
+          if(!success) {
+            delete builder.queue[dist];
+            delete builder.status[dist];
+            builder.dists = builder.dists.filter(function(d) { return d != dist; });
+            builder.tmprepo.clean([dist], function(err) {
+              if(err) {
+                console.log('Error: cleaning tmp repo');
+                console.log(err.message);
+              }
+            });
+            console.log('Batch for', dist, 'canceled');
+          } else  {
+            builder.status[dist] = 2;
+          }
+          break;
+        case "post":
+          console.log('Error: Postbuild finished before build');
+          break;
+        default:
+          console.log('Error: Invalid build type', type);
+      }
+      break;
+    case 2:
+      switch(type) {
+        case "build":
+          console.log('Error: Multiple build finished');
+          break;
+        case "post":
+          console.log('PostBuild for', dist, success ? 'succeeded' : 'failed');
+          if(!success) {
+            delete builder.queue[dist];
+            delete builder.status[dist];
+            builder.dists = builder.dists.filter(function(d) { return d != dist; });
+            builder.tmprepo.clean([dist], function(err) {
+              if(err) {
+                console.log('Error: cleaning tmp repo');
+                console.log(err.message);
+              }
+            });
+            console.log('Batch for', dist, 'canceled');
+          } else if(builder.queue[dist].length == 0) {
+            console.log('Batch for', dist, 'finished');
+            delete builder.queue[dist];
+            delete builder.status[dist];
+            builder.dists = builder.dists.filter(function(d) { return d != dist; });
+            builder.tmprepo.move(builder.repo, [dist], function(err) {
+              if(err) {
+                console.log('Error: moving files from tmp repo to main repo');
+                console.log(err.message);
+              } else {
+                builder.as.forEachSerial('rem_'+dist, builder.queue['tmp'], function(pkg, callback) {
+                  builder.repo.remove(pkg.name, [dist], callback);
+                }, function(err) {
+                  if(err) {
+                    console.log('Error: removing old packages from main repo');
+                    console.log(err.message);
+                  } else {
+                    if(builder.dists.length == 0) delete builder.queue['tmp'];
+                    builder.repo.insert([dist], function(err) {
+                      if(err) {
+                        console.log('Error: inserting packages into main repo');
+                        console.log(err.message);
+                      } else {
+                        builder.tmprepo.clean([dist], function(err) {
+                          if(err) {
+                            condsole.log('Error: cleaning tmp repo');
+                            console.log(err.message);
+                          } 
+                        });
+                      }
+                    });
+                  }
+                });
+              }
+            });
+          } else {
+            builder.start([dist]);
+          }
+          break;
+        default:
+          console.log('Error: Invalid build type', type);
+      }
+      break;
+    default:
+      console.log('Error: Invalid build status');
+  }
 }
 
 exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
@@ -290,98 +400,6 @@ exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
       });
     }
   }, callbackFin);
-}
-
-exports.Builder.prototype.processBatch = function (type, dist, status) {
-  var builder = this;
-  var success = status == 0;
-  switch(builder.status[dist]) {
-    case undefined:
-      console.log('Error: No batch for', dist);
-      break;
-    case 0:
-      console.log('Error: Batch not started');
-      break;
-    case 1:
-      switch(type) {
-        case "build":
-          console.log('Build for', dist, success ? 'succeeded' : 'failed');
-          if(!success) {
-            delete builder.queue[dist];
-            delete builder.status[dist];
-            builder.dists = builder.dists.filter(function(d) { return d != dist; });
-            builder.tmprepo.clean([dist], function(err) {
-              if(err) {
-                console.log('Error: cleaning tmp repo');
-                console.log(err.message);
-              }
-            });
-            console.log('Batch for', dist, 'canceled');
-          } else  {
-            builder.status[dist] = 2;
-          }
-          break;
-        case "post":
-          console.log('Error: Postbuild finished before build');
-          break;
-        default:
-          console.log('Error: Invalid build type', type);
-      }
-      break;
-    case 2:
-      switch(type) {
-        case "build":
-          console.log('Error: Multiple build finished');
-          break;
-        case "post":
-          console.log('PostBuild for', dist, success ? 'succeeded' : 'failed');
-          if(!success) {
-            delete builder.queue[dist];
-            delete builder.status[dist];
-            builder.dists = builder.dists.filter(function(d) { return d != dist; });
-            builder.tmprepo.clean([dist], function(err) {
-              if(err) {
-                console.log('Error: cleaning tmp repo');
-                console.log(err.message);
-              }
-            });
-            console.log('Batch for', dist, 'canceled');
-          } else if(builder.queue[dist].length == 0) {
-            console.log('Batch for', dist, 'finished');
-            delete builder.queue[dist];
-            delete builder.status[dist];
-            builder.dists = builder.dists.filter(function(d) { return d != dist; });
-            builder.tmprepo.move(builder.repo, [dist], function(err) {
-              if(err) {
-                console.log('Error: moving files from tmp repo to main repo');
-                console.log(err.message);
-              } else {
-                builder.repo.insert([dist], function(err) {
-                  if(err) {
-                    console.log('Error: inserting packages into main repo');
-                    console.log(err.message);
-                  } else {
-                    builder.tmprepo.clean([dist], function(err) {
-                      if(err) {
-                        condsole.log('Error: cleaning tmp repo');
-                        console.log(err.message);
-                      } 
-                    });
-                  }
-                });
-              }
-            });
-          } else {
-            builder.start([dist]);
-          }
-          break;
-        default:
-          console.log('Error: Invalid build type', type);
-      }
-      break;
-    default:
-      console.log('Error: Invalid build status');
-  }
 }
 
 exports.Builder.prototype.getBuildList = function (dep, dist, pkgs, callback) {

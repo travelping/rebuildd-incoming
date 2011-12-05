@@ -3,18 +3,12 @@ var Fs      = require('fs'),
     Cp      = require('child_process'),
     As      = require(__dirname + '/async.js');
 
-function repreproError (err) {
-  console.log('reprepro START');
-  console.log(err);
-  console.log('reprepro END');
-}
-
-exports.Manager = function (name, baseDir, dists, arch, incomingScript) {
+exports.Manager = function (name, baseDir, dists, arch, repoScript) {
   this.name = name;
   this.dir = baseDir;
   this.dists = dists;
   this.arch = arch;
-  this.incomingScript = incomingScript;
+  this.repoScript = repoScript;
   this.as = new As.State;
 }
 
@@ -61,14 +55,13 @@ exports.Manager.prototype.clean = function (dists, callbackFin) {
       
       Cp.exec(cmd_list + ' | cut -d " " -f2', function (error, stdout, stderr) {
         if(error) {
-          repreproError(stderr);
-          callback1(error);
+          callback({message: stderr});
         } else {  
           var lines = stdout.split('\n').slice(0, -1);
           mgr.as.forEachSerial(uid+'_'+dist, lines, function(pkg, callback2) {
             Cp.exec(cmd_del + ' ' + pkg, function (error, stdout, stderr) {
               if(error) {
-                repreproError(stderr);
+                callback({message: stderr});
               }
               callback2(error);
             });
@@ -104,13 +97,28 @@ exports.Manager.prototype.insert = function (dists, callbackFin) {
   console.log('insert new packages into repo "'+mgr.name+'"');
   mgr.as.forEachParallel(uid, dists, function(dist, callback) {
     var repo = Path.join(mgr.dir, dist);
-    Cp.execFile(mgr.incomingScript, [repo, 'processincoming', 'rebuildd'],
+    Cp.execFile(mgr.repoScript, [repo, 'processincoming', 'rebuildd'],
       function (error, stdout, stderr) {
         if(error) {
-          repreproError(stderr);
+          callback({message: stderr});
         }
         callback(error);
     });
   }, callbackFin);
 }
 
+exports.Manager.prototype.remove = function (name, dists, callbackFin) {
+  var mgr = this;
+  var uid = 'remove_' + JSON.stringify(dists);
+  console.log('remove package "'+name+'" from repo "'+mgr.name+'"');
+  mgr.as.forEachParallel(uid, dists, function(dist, callback) {
+    var repo = Path.join(mgr.dir, dist);
+    Cp.execFile(mgr.repoScript, [repo, 'remove', dist, name],
+      function (error, stdout, stderr) {
+        if(error) {
+          callback({message: stderr});
+        }
+        callback(error);
+    });
+  }, callbackFin);
+}

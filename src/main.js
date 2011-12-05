@@ -24,7 +24,7 @@ var knownOptions = {
   'output-dir': Path,
   'repo-dir': Path,
   'tmp-repo-dir': Path,
-  'incoming-script': Path,
+  'repo-script': Path,
   'rbhost': String,
   'whost': String,
   'rbport': 'PosInteger',
@@ -53,7 +53,7 @@ exports.main = function () {
       tmpRepoDir = options['tmp-repo-dir'] || '',
       arch = options['arch'] || 'amd64',
       priority = options['priority'] || 'high',
-      incomingScript = options['incoming-script'] || '';
+      repoScript = options['repo-script'] || '';
 
   inputDir = (options['input-dir'] && Path.resolve(options['input-dir'])) || Path.resolve('.');
 
@@ -81,8 +81,8 @@ exports.main = function () {
     process.exit(1);
   }
   
-  if (!Path.existsSync(incomingScript)) {
-    console.log('Error: Incoming script ' + incomingScript + ' does not exist.');
+  if (!Path.existsSync(repoScript)) {
+    console.log('Error: Repo script ' + repoScript + ' does not exist.');
     process.exit(1);
   }
   
@@ -118,8 +118,8 @@ exports.main = function () {
     readyList.push(pkg);
   });
   
-  var tmprepo = new Repo.Manager('tmp', tmpRepoDir, dists, arch, incomingScript);
-  var repo = new Repo.Manager('main', repoDir, dists, arch, incomingScript);
+  var tmprepo = new Repo.Manager('tmp', tmpRepoDir, dists, arch, repoScript);
+  var repo = new Repo.Manager('main', repoDir, dists, arch, repoScript);
   
   builder = new Builder.Builder(priority, rebuildd, tmprepo, repo, inputDir, outputDir);
   
@@ -176,6 +176,7 @@ function cli(data, callback) {
           callback('invalid parameter\n');
       }
       break;
+    case "build":
     case "start":
       var dep, valid = true;
       switch(cmd[1]) {
@@ -214,10 +215,11 @@ function cli(data, callback) {
       builder.init(dep, build_dists, processList, function(ret, error) {
         switch(ret) {
           case 0: callback('ok: batch started\n'); break;
-          case 1: callback('failed: batch in process\n'); break;
-          case 2: callback('failed: error during batch setup\n');
+          case 1: callback('ok: nothing to do\n'); break;
+          case 2: callback('failed: batch in process\n'); break;
+          case 3: callback('failed: error during batch setup\n');
                   callback(error.message+'\n'); break;
-          case 3: callback('failed: error during moving package files\n');
+          case 4: callback('failed: error during moving package files\n');
                   callback(error.message+'\n'); break;
         }
         processList = [];
@@ -292,7 +294,7 @@ function usage(exitStatus) {
   console.log('  --output-dir <OutDir>      -- (required) move uploaded packages to <OutDir>');
   console.log('  --input-dir <Directory>    -- (required) watch for packages in <Directory> (defaults to the current directory)');
   console.log('  --repo-dir <Directory>     -- (required) check repository for dependencies');
-  console.log('  --incoming-script <Path>   -- (required) script for inserting new packages into repository');
+  console.log('  --repo-script <Path>       -- (required) script for inserting/removing packages into/from repository');
   console.log('  --tmp-repo-dir <Directory> -- temporary repository during dependency build');
   console.log('  --arch <Directory>         -- architecture to check with dependency check (defaults to amd64)');
   console.log('  --rbhost <Host>            -- connect to rebuildd on <Host> (defaults to 127.0.0.1)');
