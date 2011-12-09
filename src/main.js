@@ -147,7 +147,7 @@ function cli(data, callback) {
             var regexp = new RegExp(cmd[2]);
             if(pkg.name.search(regexp) != -1) {
               processList.push(pkg);
-              callback(pkg.name + ' added\n');
+              callback(pkg.name + ' ' + pkg.version + ' added\n');
               return false;
             }
             return true;
@@ -156,7 +156,7 @@ function cli(data, callback) {
         case "all":
           readyList.forEach(function(pkg) {
             processList.push(pkg);
-            callback(pkg.name + ' added\n');
+            callback(pkg.name + ' ' + pkg.version + ' added\n');
           });
           readyList = [];
           break;
@@ -235,7 +235,7 @@ function cli(data, callback) {
           list.forEach(function(pkg) {
             if(pkg.newpkg) callback(' new: ');
             else callback('repo: ');
-            callback(pkg.name+' [');
+            callback(pkg.name+' '+pkg.version+' [');
             if(pkg.depssave.length > 0) {
               if(pkg.depssave[0].name) callback(pkg.depssave[0].name+' ('+pkg.depssave[0].op+' '+pkg.depssave[0].version+')');
               else callback(pkg.depssave[0]);

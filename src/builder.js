@@ -217,7 +217,7 @@ exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
   builder.as.forEachParallel('prepare', pkgs, function(pkg, callback1) {
     if(pkg.newpkg) {
       // move package files
-      builder.as.forEachParallel('prepare_'+pkg.name, pkg.files, function (f, callback2) {
+      builder.as.forEachParallel('prepare_'+pkg.name+'_'+pkg.version, pkg.files, function (f, callback2) {
         var newPath = Path.join(builder.outputDir, Path.basename(f.file));
         Fs.rename(f.file, newPath, function(err) {
           callback2(err, newPath);
