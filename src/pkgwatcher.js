@@ -80,6 +80,9 @@ function dscFileComponents (dir, file, callback) {
       if (line.match(/^Build-Depends: (.*)$/)) {
 	    pkgObj.deps = RegExp['$1'].split(', ');
       }
+      else if (line.match(/^Binary: (.*)$/)) {
+	    pkgObj.bins = RegExp['$1'].split(', ');
+      }
       else if (line.match(/^Files: *$/)) {
 	    inFileSection = true;
       }

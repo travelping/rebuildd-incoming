@@ -37,7 +37,8 @@ var knownOptions = {
 };
 var shortcuts = { 'h': ['--help'] };
 
-var builder;
+var dists;
+var builder, repo, tmprepo;
 var readyList = [], processList = [];
 
 var inputDir;
@@ -118,13 +119,13 @@ exports.main = function () {
     readyList.push(pkg);
   });
   
-  var tmprepo = new Repo.Manager('tmp', tmpRepoDir, dists, arch, repoScript);
-  var repo = new Repo.Manager('main', repoDir, dists, arch, repoScript);
+  tmprepo = new Repo.Manager('tmp', tmpRepoDir, dists, arch, repoScript);
+  repo = new Repo.Manager('main', repoDir, dists, arch, repoScript);
   
   builder = new Builder.Builder(priority, rebuildd, tmprepo, repo, inputDir, outputDir);
   
-  console.log('Clearing tmp repositories');
-  tmprepo.clean(dists);
+  tmprepo.clean(dists, function(err) {});
+  repo.cleanIncoming(dists, function(err) {});
   
 }
 
@@ -137,7 +138,14 @@ function cli(data, callback) {
       return;
     case "list":
       readyList.forEach(function(pkg) {
-        callback(pkg.name + ' ' + pkg.version + '\n');
+        callback(pkg.name + ' ' + pkg.version + ' [');
+        if(pkg.bins.length > 0) {
+          callback(pkg.bins[0]);
+          pkg.bins.slice(1).forEach(function(bin) {
+            callback(', ' + bin);
+          });
+        }
+        callback(']\n');
       });
       break;
     case "select":
@@ -214,7 +222,7 @@ function cli(data, callback) {
       waitprompt = true;
       builder.init(dep, build_dists, processList, function(ret, error) {
         switch(ret) {
-          case 0: callback('ok: batch started\n'); break;
+          case 0: callback('ok: batch started\n'); processList = []; break;
           case 1: callback('ok: nothing to do\n'); break;
           case 2: callback('failed: batch in process\n'); break;
           case 3: callback('failed: error during batch setup\n');
@@ -222,7 +230,6 @@ function cli(data, callback) {
           case 4: callback('failed: error during moving package files\n');
                   callback(error.message+'\n'); break;
         }
-        processList = [];
         callback('> ');
       });
       break;
@@ -256,6 +263,9 @@ function cli(data, callback) {
       builder.reset();
       Cp.exec('touch '+inputDir+'/*', function (error, stdout, stderr) {});
       break;
+    case "debug":
+      callback('Debug '+(builder.toggleDebug() ? 'on' : 'off')+'\n');
+      break;
     case "status":
       builder.getDists().forEach(function(dist) {
         callback(dist+': ');
@@ -267,6 +277,34 @@ function cli(data, callback) {
         callback(', '+builder.getQueue(dist).length+' in queue\n');
       });
       break;
+    case "tmp":
+      switch(cmd[1]) {
+        case "list":
+          switch(cmd[2]) {
+            case undefined: tmprepo.list(dists, 'tmp-incoming', callback); break;
+            case "in":      tmprepo.list(dists, 'incoming', callback); break;
+            default:        callback('invalid parameter\n');
+          }
+          break;
+        case "move":
+          var dir = undefined;
+          switch(cmd[2]) {
+            case undefined: dir = 'tmp-incoming'; break;
+            case "in":      dir = 'tmp-incoming'; break;
+            default:        callback('invalid parameter\n');
+          }
+          if(dir) {
+            waitprompt = true;
+            tmprepo.move(repo, dists, dir, function(err) {
+              if(err) callback('failed: '+err.message+'\n');
+              callback('> ');
+            });
+          }
+          break;
+        default:
+          callback('invalid parameter\n');
+      }
+    break;
     case "help":
       callback('done <dist> <status>              - internal cmd\n');
       callback('list                              - list ready packages\n');
@@ -279,7 +317,9 @@ function cli(data, callback) {
       callback('      rebuild all|<dist[,dist..]> - build new and rebuild paternal\n');
       callback('deps                              - list packages to be rebuild\n');
       callback('reset                             - clears queues, unlocks, rereads incoming dir\n');
+      callback('debug                             - enable debug log messages\n');
       callback('status                            - status about current batches\n');
+      callback('tmp list [in]|move [in]           - list tmp repo [incoming]/move pkgs [from incoming] to main repo\n');
       break;
     default:
       callback('invalid cmd\n');

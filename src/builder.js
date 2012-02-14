@@ -13,10 +13,17 @@ exports.Builder = function (priority, rebuildd, tmprepo, repo, inputDir, outputD
   this.priority = priority;
   this.inputDir = inputDir;
   this.outputDir = outputDir;
-  this.as = new As.State;
   this.tmprepo = tmprepo;
   this.repo = repo;
   this.rebuildd = rebuildd;
+  this.debug = false;
+}
+
+exports.Builder.prototype.toggleDebug = function () {
+  this.debug = !this.debug;
+  this.repo.setDebug(this.debug);
+  this.tmprepo.setDebug(this.debug);
+  return this.debug;
 }
 
 exports.Builder.prototype.getStatus = function (dist) {
@@ -168,29 +175,31 @@ exports.Builder.prototype.processBatch = function (type, dist, status) {
             delete builder.queue[dist];
             delete builder.status[dist];
             builder.dists = builder.dists.filter(function(d) { return d != dist; });
-            builder.tmprepo.move(builder.repo, [dist], function(err) {
+            builder.repo.cleanIncoming([dist], function(err) {
               if(err) {
-                console.log('Error: moving files from tmp repo to main repo');
+                console.log('Error: cleaning main repo incoming dirs');
                 console.log(err.message);
               } else {
-                builder.as.forEachSerial('rem_'+dist, builder.queue['tmp'], function(pkg, callback) {
-                  builder.repo.remove(pkg.name, [dist], callback);
-                }, function(err) {
+                builder.tmprepo.move(builder.repo, [dist], 'tmp-incoming', function(err) {
                   if(err) {
-                    console.log('Error: removing old packages from main repo');
+                    console.log('Error: moving files from tmp repo to main repo');
                     console.log(err.message);
                   } else {
-                    if(builder.dists.length == 0) delete builder.queue['tmp'];
-                    builder.repo.insert([dist], function(err) {
+                    As.forEachSeries(builder.queue['tmp'], function(pkg, callback1) {
+                      As.forEachSeries(pkg.bins, function(bin, callback2) {
+                        builder.repo.remove(bin, [dist], callback2);
+                      }, callback1);
+                    }, function(err) {
                       if(err) {
-                        console.log('Error: inserting packages into main repo');
+                        console.log('Error: removing old packages from main repo');
                         console.log(err.message);
                       } else {
-                        builder.tmprepo.clean([dist], function(err) {
+                        if(builder.dists.length == 0) delete builder.queue['tmp'];
+                        builder.repo.insert([dist], function(err) {
                           if(err) {
-                            condsole.log('Error: cleaning tmp repo');
+                            console.log('Error: inserting packages into main repo');
                             console.log(err.message);
-                          } 
+                          }
                         });
                       }
                     });
@@ -214,27 +223,40 @@ exports.Builder.prototype.processBatch = function (type, dist, status) {
 exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
   var builder = this;
   console.log('prepare packages');
-  builder.as.forEachParallel('prepare', pkgs, function(pkg, callback1) {
+  As.map(pkgs, function(pkg, callback1) {
     if(pkg.newpkg) {
-      // move package files
-      builder.as.forEachParallel('prepare_'+pkg.name+'_'+pkg.version, pkg.files, function (f, callback2) {
-        var newPath = Path.join(builder.outputDir, Path.basename(f.file));
-        Fs.rename(f.file, newPath, function(err) {
-          callback2(err, newPath);
-        });
-      }, function(err, pkgFiles) {
-        if(err) {
-          callback1(err);
-          return;
-        }
-        // move the dsc file itself
-        var newDscPath = Path.join(builder.outputDir, pkg.filename);
-        pkgFiles.push(newDscPath);
-        pkg.files = pkgFiles;
-        Fs.rename(Path.join(builder.inputDir, pkg.filename), newDscPath, function(err) {
+      As.series([
+        function(callback2) {
+          // move package files
+          As.forEach(pkg.files, function (f, callback3) {
+            var name = Path.basename(f.file);
+            var newPath = Path.join(builder.outputDir, name);
+            Fs.rename(f.file, newPath, function (err) {
+              if(err && err.code == 'ENOENT') {
+                Fs.stat(newPath, function(err2, stat) {
+                  if(err2) {
+                    console.log('error: '+name+' either in incoming nor working dir');
+                    callback3(err);
+                  } else {
+                    console.log('warning: '+name+' not in incoming but working dir');
+                    callback3(undefined);
+                  }
+                });
+              } else {
+                callback3(err);
+              }
+            });
+          }, callback2);
+        },
+        function(callback2) {
+          // move the dsc file itself
+          var newDscPath = Path.join(builder.outputDir, pkg.filename);
+          Fs.rename(Path.join(builder.inputDir, pkg.filename), newDscPath, function(err) {
+            callback2(err);
+          });
+        }], function(err, results) {
           callback1(err, pkg);
         });
-      });
     } else {
       var pkgfilename = pkg.name+'_'+pkg.version+'.tar.gz';
       var pkgfile = Path.join(builder.outputDir, pkgfilename);
@@ -263,7 +285,7 @@ exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
                     if(err) callback1(err);
                     else {
                       pkg.version = version;
-                      callback1(false, pkg);
+                      callback1(undefined, pkg);
                     }
                   });
                 }
