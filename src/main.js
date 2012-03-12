@@ -1,11 +1,13 @@
-var Nopt = require('nopt'),
-    Path = require('path'),
-    Cp = require('child_process'),
-    PkgWatcher = require(__dirname + '/pkgwatcher.js'),
-    Rebuildd = require(__dirname + '/rebuildd.js'),
-    Builder = require(__dirname + '/builder.js'),
-    Repo = require(__dirname + '/repo.js'),
-    CLI = require(__dirname + '/cli.js');
+var PkgWatcher = require(__dirname + '/pkgwatcher.js'),
+    Rebuildd   = require(__dirname + '/rebuildd.js'),
+    Builder    = require(__dirname + '/builder.js'),
+    Repo       = require(__dirname + '/repo.js'),
+    CLI        = require(__dirname + '/cli.js'),
+    As         = require('async'),
+    Nopt       = require('nopt'),
+    Path       = require('path'),
+    Cp         = require('child_process'),
+    Fs         = require('fs');
 
 Nopt.typeDefs['PosInteger'] = {
   type: 'PosInteger',
@@ -20,10 +22,13 @@ Nopt.typeDefs['PosInteger'] = {
 };
 
 var knownOptions = {
-  'input-dir': Path,
-  'output-dir': Path,
+  'incoming-dir': Path,
+  'working-dir': Path,
   'repo-dir': Path,
-  'tmp-repo-dir': Path,
+  'batch-dir': Path,
+  'base-dir': Path,
+  'link-dir': Path,
+  'out-dir': Path,
   'repo-script': Path,
   'rbhost': String,
   'whost': String,
@@ -38,10 +43,12 @@ var knownOptions = {
 var shortcuts = { 'h': ['--help'] };
 
 var dists;
-var builder, repo, tmprepo;
+var builder, repo;
 var readyList = [], processList = [];
 
-var inputDir;
+var incomingDir;
+
+var modes = ['nodep', 'dep', 'rebuild'], distlen = 0;
 
 exports.main = function () {
   var options = Nopt(options, {}, process.argv, 2),
@@ -49,36 +56,39 @@ exports.main = function () {
       rbport = options['rbport'] || '9999',
       chost = options['chost'] || '127.0.0.1',
       cport = options['cport'] || '9997',
-      outputDir = options['output-dir'] && Path.resolve(options['output-dir']),
+      workingDir = options['working-dir'] && Path.resolve(options['working-dir']),
       repoDir = options['repo-dir'] || '',
-      tmpRepoDir = options['tmp-repo-dir'] || '',
+      batchDir = options['batch-dir'] || '',
+      baseDir = options['base-dir'] || '',
+      linkDir = options['link-dir'] || '',
+      outDir = options['out-dir'] || '',
       arch = options['arch'] || 'amd64',
       priority = options['priority'] || 'high',
       repoScript = options['repo-script'] || '';
 
-  inputDir = (options['input-dir'] && Path.resolve(options['input-dir'])) || Path.resolve('.');
+  incomingDir = (options['incoming-dir'] && Path.resolve(options['incoming-dir'])) || Path.resolve('.');
 
   if (options.help) {
     usage(0);
   }
 
-  if (!outputDir) {
-    console.log('Error: No output directory specified');
+  if (!workingDir) {
+    console.log('Error: No working directory specified');
     usage(1);
   } else {
-    if (outputDir == inputDir) {
-      console.log('Error: You cannot use the same directory for input and output');
+    if (workingDir == incomingDir) {
+      console.log('Error: You cannot use the same directory for incoming and working');
       usage(1);
     }
   }
 
-  if (!Path.existsSync(inputDir)) {
-    console.log('Error: Input Directory ' + inputDir + ' does not exist.');
+  if (!Path.existsSync(incomingDir)) {
+    console.log('Error: Incoming Directory ' + incomingDir + ' does not exist.');
     process.exit(1);
   }
 
-  if (!Path.existsSync(outputDir)) {
-    console.log('Error: Output Directory ' + outputDir + ' does not exist.');
+  if (!Path.existsSync(workingDir)) {
+    console.log('Error: Working Directory ' + workingDir + ' does not exist.');
     process.exit(1);
   }
   
@@ -92,8 +102,23 @@ exports.main = function () {
     process.exit(1);
   }
 
-  if(!Path.existsSync(tmpRepoDir)) {
-    console.log('Error: Tmp Repository Directory ' + tmpRepoDir + ' does not exist.');
+  if(!Path.existsSync(batchDir)) {
+    console.log('Error: Batch Directory ' + batchDir + ' does not exist.');
+    process.exit(1);
+  }
+  
+  if(!Path.existsSync(baseDir)) {
+    console.log('Error: Base Directory ' + baseDir + ' does not exist.');
+    process.exit(1);
+  }
+  
+  if(!Path.existsSync(linkDir)) {
+    console.log('Error: Repo link Directory ' + linkDir + ' does not exist.');
+    process.exit(1);
+  }
+  
+  if(!Path.existsSync(outDir)) {
+    console.log('Error: Rebuildd out Directory ' + outDir + ' does not exist.');
     process.exit(1);
   }
   
@@ -113,19 +138,30 @@ exports.main = function () {
   console.log('Starting cli:', chost + ':' + cport);
   new CLI.Server(chost, cport, cli);
   
-  console.log('Watching Directory:', inputDir);
-  PkgWatcher.watchDir(inputDir, outputDir).on('package', function(pkg) {
+  console.log('Watching Directory:', incomingDir);
+  PkgWatcher.watchDir(incomingDir).on('package', function(pkg) {
     pkg.newpkg = true;
     readyList.push(pkg);
   });
   
-  tmprepo = new Repo.Manager('tmp', tmpRepoDir, dists, arch, repoScript);
-  repo = new Repo.Manager('main', repoDir, dists, arch, repoScript);
+  var repo = [];
+  dists.forEach(function(dist) {
+    var dir = Path.join(repoDir, dist);
+    repo[dist] = new Repo.Manager('main', dir, dist, arch, repoScript);
+    if(dist.length > distlen) distlen = dist.length;
+  });
+  distlen++;
   
-  builder = new Builder.Builder(priority, rebuildd, tmprepo, repo, inputDir, outputDir);
+  builder = new Builder.Builder(incomingDir, workingDir, batchDir, baseDir, linkDir, outDir,
+    repoScript, arch, repo, rebuildd, priority);
   
-  tmprepo.clean(dists, function(err) {});
-  repo.cleanIncoming(dists, function(err) {});
+  builder.recover(function(err) {
+    if(err) {
+      console.log('Error: Failed to read batches.');
+      console.log(err.message);
+      process.exit(1);
+    }
+  });
   
 }
 
@@ -134,10 +170,10 @@ function cli(data, callback) {
   var cmd = data.slice(0,-1).split(' ');
   switch(cmd[0]) {
     case "done":
-      builder.processBatch(cmd[1], cmd[2], cmd[3]);
+      builder.processBatch(cmd[1], cmd[2]);
       return;
     case "list":
-      readyList.forEach(function(pkg) {
+      var showPkg = function(pkg, info) {
         callback(pkg.name + ' ' + pkg.version + ' [');
         if(pkg.bins.length > 0) {
           callback(pkg.bins[0]);
@@ -145,8 +181,27 @@ function cli(data, callback) {
             callback(', ' + bin);
           });
         }
-        callback(']\n');
-      });
+        callback('] '+info+'\n');
+      }
+      if(cmd[1] == undefined) readyList.forEach(function(pkg) { showPkg(pkg, ''); });
+      else {
+        var batch = undefined;
+        builder.getBatch().every(function(b) {
+            if(b.id == cmd[1]) {
+            batch = b;
+            return false;
+            }
+            return true;
+        });
+        if(!batch) callback({message: 'No batch with ID '+cmd[1]});
+        else {
+          batch.done.forEach(function(pkg) {
+            if(pkg == batch.pkg) showPkg(pkg, batch.status);
+            else showPkg(pkg, 'done');
+          });
+          batch.list.forEach(function(pkg) { showPkg(pkg, 'todo'); });
+        }
+      }
       break;
     case "select":
       switch(cmd[1]) {
@@ -184,13 +239,15 @@ function cli(data, callback) {
           callback('invalid parameter\n');
       }
       break;
-    case "build":
     case "start":
       var dep, valid = true;
       switch(cmd[1]) {
         case "nodep":   dep = 0; break;
         case "dep":     dep = 1; break;
-        case "rebuild": dep = 2; break
+        case "rebuild": // dep = 2; break
+          callback('not implemented\n');
+          valid = false;
+          break;
         default:
           callback('invalid parameter\n');
           valid = false;
@@ -220,16 +277,67 @@ function cli(data, callback) {
         break;
       }
       waitprompt = true;
-      builder.init(dep, build_dists, processList, function(ret, error) {
-        switch(ret) {
-          case 0: callback('ok: batch started\n'); processList = []; break;
-          case 1: callback('ok: nothing to do\n'); break;
-          case 2: callback('failed: batch in process\n'); break;
-          case 3: callback('failed: error during batch setup\n');
-                  callback(error.message+'\n'); break;
-          case 4: callback('failed: error during moving package files\n');
-                  callback(error.message+'\n'); break;
+      error = undefined;
+      As.forEachSeries(build_dists, function(dist, callback1) {
+        builder.init(dist, dep, processList, function(err) {
+          parseRet(err, dist+': ', callback);
+          error = err;
+          callback1(undefined);
+        });
+      }, function(bla) {
+        if(!error) {
+          builder.cleanIncoming(processList, function(err) {
+            if(err) {
+              callback('warning: failed to clean incoming\n');
+              callback(err.message+'\n');
+            }
+          });
+          processList = [];
         }
+        callback('> ');
+      });
+      break;
+    case "continue":
+      if(cmd[1] == undefined) {
+        callback('invalid parameter\n');
+        break;
+      }
+      waitprompt = true;
+      builder.cont(cmd[1], processList, function(err) {
+        parseRet(err, '', callback);
+        if(!err) {
+          builder.cleanIncoming(processList, function(err) {
+            if(err) {
+              callback('warning: failed to clean incoming\n');
+              callback(err.message+'\n');
+            }
+          });
+          processList = [];
+        }
+        callback('> ');
+      });
+      break;
+    case "stop":
+      if(cmd[1] == undefined) {
+        callback('invalid parameter\n');
+        break;
+      }
+      waitprompt = true;
+      builder.stop(cmd[1], function(err) {
+        if(err) callback(err.message+'\n');
+        else callback('stopped\n');
+        callback('> ');
+      });
+      break;
+    case "cancel":
+      if(cmd[1] == undefined) {
+        callback('invalid parameter\n');
+        break;
+      }
+      waitprompt = true;
+      builder.cancel(cmd[1], function(err) {
+        if(err) callback(err.message+'\n');
+        else callback('canceled\n');
         callback('> ');
       });
       break;
@@ -261,53 +369,32 @@ function cli(data, callback) {
       readyList = [];
       processList = [];
       builder.reset();
-      Cp.exec('touch '+inputDir+'/*', function (error, stdout, stderr) {});
-      break;
-    case "debug":
-      callback('Debug '+(builder.toggleDebug() ? 'on' : 'off')+'\n');
+      builder.recover(function(err) {
+        if(err) {
+          callback('Batch recover failed\n');
+          callback(err.message+'\n');
+        }
+      });
+      Cp.exec('find '+incomingDir+' -exec touch {} \\;', function (error, stdout, stderr) {});
       break;
     case "status":
-      builder.getDists().forEach(function(dist) {
-        callback(dist+': ');
-        switch(builder.getStatus(dist)) {
-          case 0: callback('Build ready'); break;
-          case 1: callback('Build in process'); break;
-          case 2: callback('Build done'); break;
-        }
-        callback(', '+builder.getQueue(dist).length+' in queue\n');
+      callback('id\tdist');
+      callback(genChars(distlen-'dist'.length, ' '));
+      callback('mode\tstatus\tleft\tcurrent\n');
+      callback('--------');
+      callback(genChars(distlen-4, '-'));
+      callback('----------------------------------------\n');
+      builder.getBatch().forEach(function(batch) {
+        var name = batch.pkg ? batch.pkg.name : "";
+        var dist = batch.dist+genChars(distlen-batch.dist.length, ' ');
+        var mode = modes[batch.mode];
+        callback(batch.id+'\t'+dist+mode+'\t'+batch.status);
+        callback('\t'+batch.list.length+'\t'+name+'\n');
       });
       break;
-    case "tmp":
-      switch(cmd[1]) {
-        case "list":
-          switch(cmd[2]) {
-            case undefined: tmprepo.list(dists, 'tmp-incoming', callback); break;
-            case "in":      tmprepo.list(dists, 'incoming', callback); break;
-            default:        callback('invalid parameter\n');
-          }
-          break;
-        case "move":
-          var dir = undefined;
-          switch(cmd[2]) {
-            case undefined: dir = 'tmp-incoming'; break;
-            case "in":      dir = 'tmp-incoming'; break;
-            default:        callback('invalid parameter\n');
-          }
-          if(dir) {
-            waitprompt = true;
-            tmprepo.move(repo, dists, dir, function(err) {
-              if(err) callback('failed: '+err.message+'\n');
-              callback('> ');
-            });
-          }
-          break;
-        default:
-          callback('invalid parameter\n');
-      }
-    break;
     case "help":
       callback('done <dist> <status>              - internal cmd\n');
-      callback('list                              - list ready packages\n');
+      callback('list [<id>]                       - list incoming/batch packages\n');
       callback('select pkg <name>                 - select package\n');
       callback('       all                        - select all packages\n');
       callback('       list                       - list selected packages\n');
@@ -315,11 +402,12 @@ function cli(data, callback) {
       callback('start nodep   all|<dist[,dist..]> - just build\n');
       callback('      dep     all|<dist[,dist..]> - build in right order\n');
       callback('      rebuild all|<dist[,dist..]> - build new and rebuild paternal\n');
+      callback('stop <id>                         - temporarily stop batch (and switch to next waiting)\n');
+      callback('cancel <id>                       - delete batch (and switch to next waiting)\n');
+      callback('continue <id>                     - merge selected new packages into batch and continue stopped/failed batch\n');
       callback('deps                              - list packages to be rebuild\n');
-      callback('reset                             - clears queues, unlocks, rereads incoming dir\n');
-      callback('debug                             - enable debug log messages\n');
+      callback('reset                             - clears queues, recover batches, unlock builder, rereads incoming dir\n');
       callback('status                            - status about current batches\n');
-      callback('tmp list [in]|move [in]           - list tmp repo [incoming]/move pkgs [from incoming] to main repo\n');
       break;
     default:
       callback('invalid cmd\n');
@@ -327,15 +415,54 @@ function cli(data, callback) {
   if(!waitprompt) callback('> ');
 }
 
+function parseRet(err, prefix, callback) {
+  if(!err) callback(prefix+'ok: batch started\n');
+  else if(!err.ret) callback(prefix+err.message+'\n');
+  else switch(err.ret) {
+    case 1:
+      callback(prefix+'ok: nothing to do\n');
+      break;
+    case 2:
+      callback(prefix+'failed: error during batch setup\n');
+      callback(err.message+'\n');
+      break;
+    case 3:
+      callback(prefix+'failed: error during buildlist generation\n');
+      callback(err.message+'\n');
+      break;
+    case 4:
+      callback(prefix+'failed: error during preparing package files\n');
+      callback(err.message+'\n');
+      break;
+    case 5:
+      callback(prefix+'failed: error during starting batch\n');
+      callback(err.message+'\n');
+      break;
+    case 6:
+      callback(prefix+'failed: error during cleaning batchrepo\n');
+      callback(err.message+'\n');
+      break;
+  }
+}
+
+function genChars(count, char) {
+  var str = '';
+  while(count--) str += char;
+  return str;
+}
+
 function usage(exitStatus) {
   console.log('Usage: rebuildd-incoming <options>');
   console.log('Options:');
   console.log('  --dists <Distributions>    -- (required) space-separated list of distributions');
-  console.log('  --output-dir <OutDir>      -- (required) move uploaded packages to <OutDir>');
-  console.log('  --input-dir <Directory>    -- (required) watch for packages in <Directory> (defaults to the current directory)');
+  console.log('  --working-dir <WorkDir>    -- (required) move uploaded packages to <WorkDir>');
+  console.log('  --incoming-dir <Directory> -- (required) watch for packages in <Directory> (defaults to the current directory)');
   console.log('  --repo-dir <Directory>     -- (required) check repository for dependencies');
   console.log('  --repo-script <Path>       -- (required) script for inserting/removing packages into/from repository');
-  console.log('  --tmp-repo-dir <Directory> -- temporary repository during dependency build');
+  console.log('  --batch-dir <Directory>    -- temporary store batches');
+  console.log('  --base-dir <Directory>     -- directory of batch base images');
+  console.log('  --link-dir <Directory>     -- dist specific repo symlinks');
+  console.log('  --out-dir <Directory>      -- dist specific rebuildd output directories');
   console.log('  --arch <Directory>         -- architecture to check with dependency check (defaults to amd64)');
   console.log('  --rbhost <Host>            -- connect to rebuildd on <Host> (defaults to 127.0.0.1)');
   console.log('  --rbport <Port>            -- assume rebuildd is listening on <Port> (defaults to 9999)');

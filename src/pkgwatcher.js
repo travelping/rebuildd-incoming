@@ -11,11 +11,11 @@ var inotify = new Inotify();
  * are present), move the files to outputDir and emit the 'package' event with
  * an object { name: ..., version: ..., files: [...] } as the argument
  */
-exports.watchDir = function (inputDir, outputDir) {
+exports.watchDir = function (inputDir) {
   var emitter = new Events.EventEmitter;
   var watchDir = {
     path: inputDir,
-    callback: function (evt) { handleFSEvent(evt, inputDir, outputDir, emitter); },
+    callback: function (evt) { handleFSEvent(evt, inputDir, emitter); },
     watch_for: Inotify.IN_CLOSE_WRITE | Inotify.IN_MOVED_TO,
   };
   inotify.addWatch(watchDir);
@@ -25,7 +25,7 @@ exports.watchDir = function (inputDir, outputDir) {
 /* holds the dsc files that are currently being added */
 var currentPackages = {};
 
-function handleFSEvent (event, inputDir, outputDir, emitter) {
+function handleFSEvent (event, inputDir, emitter) {
   var mask = event.mask;
   var name = event.name;
   var isDir = mask & Inotify.IN_ISDIR;
@@ -36,18 +36,19 @@ function handleFSEvent (event, inputDir, outputDir, emitter) {
 
     switch (Path.extname(name)) {
       case '.dsc':
-	    dscFileComponents(inputDir, path, function (comps) {
+	    dscFileComponents(path, function (err, comps) {
+          if(err) console.log(err.message);
 	      currentPackages[name] = comps;
-          processPackages(inputDir, outputDir, currentPackages, emitter);
+          processPackages(inputDir, currentPackages, emitter);
         });
-	break;
+        break;
 
       case '.gz':
-        processPackages(inputDir, outputDir, currentPackages, emitter);
+        processPackages(inputDir, currentPackages, emitter);
         break;
 
       case '.bz2':
-        processPackages(inputDir, outputDir, currentPackages, emitter);
+        processPackages(inputDir, currentPackages, emitter);
         break;
 
       default:
@@ -56,9 +57,11 @@ function handleFSEvent (event, inputDir, outputDir, emitter) {
   }
 }
 
-function processPackages (inputDir, outputDir, packages, emitter) {
+function processPackages (inputDir, packages, emitter) {
   for (var dsc in packages) {
-    var pkgReady = packages[dsc].files.every(function (f) { return Path.existsSync(f.file) });
+    var pkgReady = packages[dsc].files.every(function (f) {
+      return Path.existsSync(Path.join(inputDir, f.file))
+    });
     if (pkgReady) {
       emitter.emit('package', packages[dsc]);
       delete packages[dsc];
@@ -66,13 +69,13 @@ function processPackages (inputDir, outputDir, packages, emitter) {
   }
 }
 
-function dscFileComponents (dir, file, callback) {
+function dscFileComponents (file, callback) {
   FS.readFile(file, 'utf8', function (err, content) {
-    if (err) throw err;
+    if(err) callback(err, undefined);
     
     var filename = Path.basename(file);
     filename.match(/^([^_]+)_(.*)\.dsc$/);
-    var pkgObj = { files: [], deps: [], name: RegExp['$1'], filename: filename, version: RegExp['$2'] };
+    var pkgObj = { files: [], deps: [], bins: [], name: RegExp['$1'], filename: filename, version: RegExp['$2'] };
     var lines = content.split('\n');
     var inFileSection = false;
 
@@ -88,13 +91,17 @@ function dscFileComponents (dir, file, callback) {
       }
       else if (inFileSection && line.match(/^ +[0-9a-f]{32} ([0-9]+) (.*) *$/)) {
         var size = parseInt(RegExp['$1']), name = RegExp['$2'];
-        pkgObj.files.push({file: Path.join(dir, name), size: size});
+        pkgObj.files.push({file: name, size: size});
       }
       else if (inFileSection && line.match('/^\S')) {
 	    inFileSection = false;
       }
     });
-
-    callback(pkgObj);
+    
+    callback(undefined, pkgObj);
   });
+}
+
+exports.analyzeDSC = function (file, callback) {
+  dscFileComponents (file, callback);
 }

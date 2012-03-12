@@ -1,204 +1,651 @@
-var As      = require(__dirname + '/async.js'),
-    Repo    = require(__dirname + '/repo.js'),
-    Rebuildd = require(__dirname + '/rebuildd.js'),
-    Path    = require('path'),
-    Cp      = require('child_process'),
-    Fs      = require('fs');
+var Repo        = require(__dirname + '/repo.js'),
+    Rebuildd    = require(__dirname + '/rebuildd.js'),
+    PkgWatcher  = require(__dirname + '/pkgwatcher.js'),
+    As          = require('async'),
+    Path        = require('path'),
+    Cp          = require('child_process'),
+    Fs          = require('fs.extra'),
+    Wrench      = require('wrench');
 
 
-exports.Builder = function (priority, rebuildd, tmprepo, repo, inputDir, outputDir) {
-  this.queue = [];
-  this.status = [];
-  this.dists = [];
-  this.priority = priority;
-  this.inputDir = inputDir;
-  this.outputDir = outputDir;
-  this.tmprepo = tmprepo;
-  this.repo = repo;
-  this.rebuildd = rebuildd;
-  this.debug = false;
+exports.Builder = function (incomedir, workdir, batchdir, basedir, linkdir, outdir,
+    reposcript, arch, repo, rebuildd, priority) {
+  
+  this.incomedir = incomedir;   // incoming directory
+  this.workdir = workdir;       // working directory
+  this.batchdir = batchdir;     // batch directory
+  this.basedir = basedir;       // dist specific batch images
+  this.linkdir = linkdir;       // dist specific repo links
+  this.outdir = outdir;         // dist specific rebuildd output directories
+  this.batch = [];              // list of active batches
+  this.current = [];            // current batch per dist
+  this.idcounter = 0;           // batchid counter
+  this.status = [];             // build status per dist
+  this.reposcript = reposcript; // repo incoming script
+  this.arch = arch;             // for use with incoming script
+  this.repo = repo;             // main repository per dist
+  this.rebuildd = rebuildd;     // rebuildd interface
+  this.priority = priority;     // build priority for rebuildd
+  this.locked = false;          // lock start/cancel/stop/cont until done
+  
+  var builder = this;
+  rebuildd.setCallback(
+    function(output, callback) { builder.rebuilddCallback(output, callback); });
 }
 
-exports.Builder.prototype.toggleDebug = function () {
-  this.debug = !this.debug;
-  this.repo.setDebug(this.debug);
-  this.tmprepo.setDebug(this.debug);
-  return this.debug;
-}
-
-exports.Builder.prototype.getStatus = function (dist) {
-  return this.status[dist];
-}
-
-exports.Builder.prototype.getQueue = function (dist) {
-  return this.queue[dist];
-}
-
-exports.Builder.prototype.getDists = function () {
-  return this.dists;
+exports.Builder.prototype.getBatch = function () {
+  return this.batch;
 }
 
 exports.Builder.prototype.reset = function () {
-  var builder = this;
-  builder.dists.forEach(function(dist) {
-    delete builder.queue[dist];
-    delete builder.status[dist];
-  });
-  builder.queue = [];
-  builder.status = [];
-  builder.dists = [];
+  this.batch.length = 0;
+  this.current.length = 0;
+  this.idcounter = 0;
+  this.status.length = 0;
+  this.locked = false;
 }
 
-exports.Builder.prototype.init = function (dep, dists, pkglist, callback) {
+exports.Builder.prototype.lock = function (callback, callbackFin) {
   var builder = this;
-  
-  console.log('Build init');
-  if(pkglist.length == 0) {
-    console.log('nothing to do');
-    callback(1, {});
-    return;
-  }
-  if(builder.dists.length > 0) {
-    var msg = 'already locked';
-    console.log(msg);
-    callback(2, {message: msg});
-    return;
-  }
-  builder.dists = dists;
-  dists.forEach(function(dist) {
-    builder.queue[dist] = [];
-    builder.status[dist] = 0;
-  });
-  builder.getBuildList(dep, dists[0], pkglist, function(error, list) {
-    if(error) {
-      builder.dists = [];
-      console.log('Error: generating buildlist');
-      console.log(error.message);
-      callback(3, error);
+  if(!builder.locked) {
+    builder.locked = true;
+    callback(function(err) {
+      builder.locked = false;
+      callbackFin(err);
+    });
+  } else
+    setTimeout(function() { builder.lock(callback, callbackFin); }, 500);
+}
+
+exports.Builder.prototype.rebuilddCallback = function (output, callback) {
+  if(output.match(/^<< "I: job (.*) \((.*)\) added"$/)) {
+    if(!this.current[RegExp['$2']]) {
+      var msg = 'Error: no batch for '+RegExp['$2']+'running';
+      console.log(msg);
+      callback({message: msg, code: 'NOTRUNNING'});
       return;
     }
-    builder.preparePkgs(list, function(error, pkgs) {
-      if(error) {
-        builder.dists = [];
-        console.log('Error: preparing packages');
-        console.log(error.message);
-        callback(4, error);
+    this.current[RegExp['$2']].job = RegExp['$1'];
+    callback(undefined);
+  } else if(output == '<< "E: unknown job"') {
+    var msg = 'Error: rebuildd: unknown job';
+    console.log(msg);
+    callback({message: msg, code: 'UNKNOWNJOB'});
+  } else if(output == '<< "I: job canceled"') {
+    callback(undefined);
+  } else {
+    var msg = 'Error: wrong rebuildd output format';
+    console.log(msg);
+    callback({message: msg, code: 'WRONGFORMAT'});
+  }
+}
+
+exports.Builder.prototype.recover = function (callbackFin) {
+  var builder = this;
+  builder.idcounter = 0;
+  Fs.readdir(builder.batchdir, function(err, files) {
+    if(err) { callbackFin(err); return; }
+    builder.batch.length = 0;
+    files.forEach(function(file) {
+      var info = Path.join(builder.batchdir, file, 'info');
+      Fs.readFile(info, 'utf8', function (err, content) {
+        if(err) { callbackFin(err); return; }
+        var count = 0;
+        var batch = {
+          id: file,
+          dir: Path.join(builder.batchdir, file),
+          dist: undefined,
+          status: undefined,
+          pkg: undefined,
+          job: undefined,
+          mode: 0,
+          list: [],
+          done: [],
+          repo: undefined};
+        content.split('\n').forEach(function(line) {
+          switch(count) {
+            case 0:
+                batch.dist = line;
+                ++count;
+                break;
+            case 1:
+                if(line == "build" || line == "wait") batch.status = 'stopped';
+                else batch.status = line;
+                ++count;
+                break;
+            case 2:
+                batch.pkg = line;
+                ++count;
+                break;
+            case 3:
+                batch.mode = parseInt(line);
+                ++count;
+          }
+        });
+        if(count != 4) { callbackFin({message: "info incomplete"}); return; }
+        var incoming = Path.join(builder.batchdir, file, 'incoming');
+        Fs.readdir(incoming, function(err, files) {
+          if(err) { callbackFin(err); return; }
+          As.forEach(files, function(file, callback) {
+            if(Path.extname(file) == '.dsc') {
+              PkgWatcher.analyzeDSC(Path.join(incoming, file), function(err, pkg) {
+                if(err) { callback(err); return; }
+                pkg.newpkg = true;
+                batch.list.push(pkg);
+                callback(undefined);
+              });
+            } else callback(undefined);
+          }, function(bla) {
+            builder.getBuildList(3, batch.dist, batch.list, function(err, list) {
+              batch.list.length = 0;
+              batch.list = list;
+              if(batch.pkg == 'none') batch.pkg = undefined;
+              else {
+                while(batch.list[0] && batch.pkg != batch.list[0].name)
+                  batch.done.push(batch.list.shift());
+                batch.pkg = batch.list.shift();
+                batch.done.push(batch.pkg);
+              }
+              var repo = Path.join(builder.batchdir, file, 'repo');
+              batch.repo = new Repo.Manager(batch.id, repo, batch.dist,
+                builder.arch, builder.reposcript);
+              builder.batch.push(batch);
+              if(batch.id > builder.idcounter) builder.idcounter = batch.id;
+            });
+          });
+        });
+      });
+    });
+    callbackFin(undefined);
+  });
+}
+
+exports.Builder.prototype.init = function (dist, mode, pkglist, callbackFin) {
+  var builder = this;
+  builder.lock(function(callback) {
+    console.log('Build init');
+    if(pkglist.length == 0) {
+      console.log('nothing to do');
+      callback({ret: 1});
+      return;
+    }
+    builder.initBatch(dist, mode, function(err, batch) {
+      if(err) {
+        console.log('Error: init batch');
+        console.log(err.message);
+        err.ret = 2;
+        callback(err);
+        return;
+      }
+      builder.startNoInit(batch, pkglist, undefined, callback);
+    });
+  }, callbackFin);
+}
+
+exports.Builder.prototype.start = function (batch, pkglist, callbackFin) {
+  var builder = this;
+  builder.lock(function(callback) {
+    startNoInit(batch, pkglist, undefined, callback);
+  }, callbackFin);
+}
+
+exports.Builder.prototype.startNoInit = function (batch, pkglist, restart, callback) {
+  var builder = this;
+  var removeBatch = function() {
+    Wrench.rmdirSyncRecursive(batch.dir, true);
+    builder.idcounter--;
+  }
+  var returnError = function(msg, code, err, callback1) {
+    console.log(msg);
+    console.log(err.message);
+    err.ret = code;
+    callback1(err);
+  }
+  builder.getBuildList(batch.mode, batch.dist, pkglist, function(err, list) {
+    if(err) {
+      if(!restart) removeBatch();
+      returnError('Error: generating buildlist', 3, err, callback);
+      return;
+    }
+    builder.preparePkgs(batch, list, function(err, pkgs) {
+      if(err) {
+        if(!restart) removeBatch();
+        returnError('Error: preparing packages', 4, err, callback);
         return;
       }
       console.log('dumping build list');
-      dists.push('tmp');
-      builder.queue['tmp'] = [];
-      for(var i=pkgs.length-1; pkgs.length > 0; i--) {
-        var pkg = pkgs.pop();
-        console.log(i+':', pkg.name);
-        dists.forEach(function(dist) {
-          builder.queue[dist].push(clone(pkg));
+      for(var i=0; i < pkgs.length; i++) {
+        console.log(i+':', pkgs[i].name);
+      }
+      batch.list = pkgs;
+      batch.done = [];
+      
+      var start = function(err) {
+        if(err) {
+          if(!restart) {
+            removeBatch();
+            builder.batch.pop();
+          }
+          returnError('Error: cleaning batch repo', 6, err, callback);
+          return;
+        }
+        builder.startBatch(batch, function(err) {
+          if(err) {
+            if(!restart) {
+              removeBatch();
+              builder.batch.pop();
+            }
+            returnError('Error: starting batch', 5, err, callback);
+            return;
+          }
+          callback(undefined);
         });
       }
-      dists.pop();
-      builder.start(dists);
-      callback(0, {});
+      
+      if(restart) {
+        while(batch.list[0]) {
+          if(batch.list[0].name == restart.name) break;
+          var found = false;
+          restart.newlist.every(function(npkg) {
+            if(batch.list[0].name == npkg.name) found = true;
+            return !found;
+          });
+          if(found) break;
+          batch.done.push(batch.list.shift());
+        }
+        As.forEachSeries(batch.list, function(pkg, callback1) {
+          batch.repo.remove(pkg.name, true, callback1);
+        }, start);
+      } else {
+        builder.batch.push(batch);
+        start(undefined);
+      }
     });
   });
 }
 
-exports.Builder.prototype.start = function (dists) {
+exports.Builder.prototype.cont = function (id, pkglist, callbackFin) {
   var builder = this;
-  console.log('Build start for', dists);
-  dists.forEach(function(dist) {
-    if(builder.queue[dist].length == 0) {
-      console.log('Error: build queue for', dist, 'empty');
-    } else {
-      var pkg = builder.queue[dist].pop();
-      builder.status[dist] = 1;
-      builder.rebuildd.queuePackage(pkg.name, pkg.version, dist, builder.priority);
+  var batch = undefined;
+  builder.batch.every(function(b) {
+    if(b.id == id) {
+      batch = b;
+      return false;
+    }
+    return true;
+  });
+  if(!batch)
+    callbackFin({message: 'Error: No batch with ID '+id});
+  else {
+    if(batch.status == 'stopped' || batch.status == 'failed') {
+      builder.lock(function(callback) {
+          console.log('pkglist', pkglist);
+        var list = batch.list.concat(batch.done);
+        console.log('list', list);
+        list = list.filter(function(opkg) {
+          var found = false;
+          pkglist.every(function(npkg) {
+              console.log(opkg.name, 'vs', npkg.name);
+            if(opkg.name == npkg.name) found = true;
+            return !found;
+          });
+          return !found;
+        });
+        console.log('list', list);
+        var restlist = list.concat(pkglist);
+        console.log('restlist', restlist);
+        var restart = {name: batch.pkg.name, newlist: pkglist};
+        builder.startNoInit(batch, restlist, restart, callback);
+      }, callbackFin);
+    } else
+      callbackFin({message: 'Error: Batch already active'});
+  }
+}
+
+exports.Builder.prototype.stop = function (id, callbackFin) {
+  var builder = this;
+  var batch = undefined;
+  builder.batch.every(function(b) {
+    if(b.id == id) {
+      batch = b;
+      return false;
+    }
+    return true;
+  });
+  if(!batch)
+    callbackFin({message: 'Error: No batch with ID '+id});
+  else {
+    if(batch.status == 'build') {
+      builder.lock(function(callback) {
+        builder.rebuildd.cancelJob(batch.job, function(err) {
+          if(err) callback(err);
+          else builder.switchBatch(batch.dist, 'stopped', callback);
+        });
+      }, callbackFin);
+    } else if(batch.status == 'wait') {
+      batch.status = 'stopped';
+      callbackFin(undefined);
+    } else
+      callbackFin({message: 'Error: Batch not active'});
+  }
+}
+
+exports.Builder.prototype.cancel = function (id, callbackFin) {
+  var builder = this;
+  var batch = undefined;
+  this.batch.every(function(b) {
+    if(b.id == id) {
+      batch = b;
+      return false;
+    }
+    return true;
+  });
+  if(!batch)
+    callbackFin({message: 'Error: No batch with ID '+id});
+  else {
+    builder.lock(function(callback) {
+      if(batch.status == 'build') {
+        builder.rebuildd.cancelJob(batch.job, function(err) {
+          if(err) callback(err);
+          else builder.finishBatch(batch.dist, callback);
+        });
+      } else {
+        builder.deleteBatch(batch);
+        callback(undefined);
+      }
+    }, callbackFin);
+  }
+}
+
+exports.Builder.prototype.initBatch = function (dist, mode, callback) {
+  this.idcounter++;
+  var batchsrc = Path.join(this.basedir, dist);
+  var batchdst = Path.join(this.batchdir, ''+this.idcounter);
+  var repodir  = Path.join(batchdst, 'repo');
+  var err = Wrench.copyDirSyncRecursive(batchsrc, batchdst);
+  if(err) {
+    console.log('Error: copy batch-base failed');
+    callback(err, {});
+  } else {
+    var batch = {
+      id: this.idcounter,
+      dir: batchdst,
+      dist: dist,
+      status: "wait",
+      job: undefined,
+      mode: mode,
+      pkg: undefined,
+      list: [],
+      done: [],
+      repo: new Repo.Manager(this.idcounter, repodir, dist, this.arch, this.reposcript)
+    };
+    this.updateBatch(batch, function(err) {
+      if(err) console.log('Error: update batch failed');
+      callback(err, batch);
+    });
+  }
+}
+
+exports.Builder.prototype.linkBatch = function(batch, callback) {
+  var link = Path.join(this.linkdir, batch.dist);
+  var repo = Path.join(batch.dir, 'repo');
+  var builder = this;
+  
+  Fs.readlink(link, function(err, str) {
+    if(err && err.code == 'ENOENT') Fs.symlink(repo, link, callback);
+    else if(err) callback(err);
+    else {
+      Fs.unlink(link, function(err) {
+        if(err) callback(err);
+        else Fs.symlink(repo, link, callback);
+      });
     }
   });
 }
 
-exports.Builder.prototype.processBatch = function (type, dist, status) {
+exports.Builder.prototype.updateBatch = function (batch, callback) {
+  var info = Path.join(batch.dir, 'info');
+  var name = batch.pkg ? batch.pkg.name : 'none';
+  Fs.writeFile(info, batch.dist+'\n'+batch.status+'\n'+name+'\n'+batch.mode, callback);
+}
+
+exports.Builder.prototype.startBatch = function (batch, callbackFin) {
+  builder = this;
+  if(builder.current[batch.dist] == batch) {
+    var msg = 'Error: batch already in progress';
+    console.log(msg);
+    callbackFin({message: msg});
+    return;
+  }
+  if(builder.status[batch.dist] > 0) {
+    callbackFin(undefined);
+    return;
+  }
+  if(batch.list.length == 0) {
+    var msg = 'Error: build queue for '+batch.id+' empty';
+    console.log(msg);
+    callbackFin({message: msg});
+    var i = builder.batch.indexOf(batch);
+    builder.batch.splice(i, i);
+    return;
+  }
+  As.forEach(batch.list, function(pkg, callback1) {
+    As.series([
+      // copy package files
+      function(callback2) {
+        As.forEach(pkg.files, function (f, callback3) {
+          var workdir = Path.join(builder.workdir, f.file);
+          var batchdir = Path.join(batch.dir, 'incoming', f.file);
+          Fs.stat(workdir, function(err, stat) {
+            if(err && err.code == 'ENOENT') Fs.copy(batchdir, workdir, callback3);
+            else callback3(err);
+          });
+        }, callback2);
+      },
+      // copy the dsc file itself
+      function(callback2) {
+        var workdir = Path.join(builder.workdir, pkg.filename);
+        var batchdir = Path.join(batch.dir, 'incoming', pkg.filename);
+        Fs.stat(workdir, function(err, stat) {
+          if(err && err.code == 'ENOENT') Fs.copy(batchdir, workdir, callback2);
+          else callback2(err);
+        });
+      }],
+    function(err, results) {
+      callback1(err);
+    });
+  }, function(err) {
+    if(err) {
+      console.log('Error: copying files to working dir');
+      callbackFin(err);
+    } else {
+      builder.linkBatch(batch, function(err) {
+        if(err) {
+          console.log('Error: creating symlink to batch repo');
+          callbackFin(err);
+        } else {
+          console.log('Batch', batch.id, '('+batch.dist+')', 'started');
+          builder.current[batch.dist] = batch;
+          builder.queueBatch(batch, callbackFin);
+        }
+      });
+    }
+  });
+}
+
+exports.Builder.prototype.queueBatch = function (batch, callback) {
+  var builder = this;
+  var pkg = batch.list.shift();
+  batch.done.push(pkg);
+  batch.status = 'build';
+  batch.pkg = pkg;
+  batch.job = undefined;
+  builder.status[batch.dist] = 1;
+  builder.rebuildd.addJob(pkg.name, pkg.version, batch.dist, builder.priority, function(err) {
+    if(err) { callback(err); return; }
+    builder.updateBatch(batch, callback);
+  });
+}
+
+exports.Builder.prototype.switchBatch = function (dist, status, callback) {
+  var builder = this;
+  var batch = builder.current[dist];
+  builder.status[dist] = 0;
+  batch.status = status;
+  builder.updateBatch(batch, function(err) {
+    if(err) { callback(err); return; }
+    for(var i=0; i<builder.batch.length; i++) {
+      var b = builder.batch[i];
+      if(b.dist == dist && b.status == 'wait') {
+        builder.current[dist] = b
+        builder.startBatch(b, callback);
+        return;
+      }
+    }
+    console.log('All batches done for', dist);
+    builder.current[dist] = undefined;
+    callback(undefined);
+  });
+}
+
+exports.Builder.prototype.deleteBatch = function (batch) {
+  Wrench.rmdirSyncRecursive(batch.dir, true);
+  var i = this.batch.indexOf(batch);
+  this.batch.splice(i, i+1);
+}
+
+exports.Builder.prototype.finishBatch = function (dist, callback) {
+  var builder = this;
+  var batch = builder.current[dist];
+  this.deleteBatch(batch);
+  builder.status[dist] = 0;
+  for(var i=0; i<builder.batch.length; i++) {
+    var b = builder.batch[i];
+    if(b.dist == dist && b.status == 'wait') {
+      builder.current[dist] = b
+      builder.startBatch(b, callback);
+      return;
+    }
+  }
+  console.log('All batches done for', dist);
+  builder.current[dist] = undefined;
+  callback(undefined);
+}
+
+exports.Builder.prototype.processBatch = function (dist, status) {
   var builder = this;
   var success = status == 0;
   switch(builder.status[dist]) {
     case undefined:
+    case 0:
       console.log('Error: No batch for', dist);
       break;
-    case 0:
-      console.log('Error: Batch not started');
-      break;
     case 1:
-      switch(type) {
-        case "build":
-          console.log('Build for', dist, success ? 'succeeded' : 'failed');
-          if(!success) {
-            delete builder.queue[dist];
-            delete builder.status[dist];
-            builder.dists = builder.dists.filter(function(d) { return d != dist; });
-            builder.tmprepo.clean([dist], function(err) {
-              if(err) {
-                console.log('Error: cleaning tmp repo');
-                console.log(err.message);
-              }
-            });
-            console.log('Batch for', dist, 'canceled');
-          } else  {
-            builder.status[dist] = 2;
-          }
-          break;
-        case "post":
-          console.log('Error: Postbuild finished before build');
-          break;
-        default:
-          console.log('Error: Invalid build type', type);
-      }
-      break;
-    case 2:
-      switch(type) {
-        case "build":
-          console.log('Error: Multiple build finished');
-          break;
-        case "post":
-          console.log('PostBuild for', dist, success ? 'succeeded' : 'failed');
-          if(!success) {
-            delete builder.queue[dist];
-            delete builder.status[dist];
-            builder.dists = builder.dists.filter(function(d) { return d != dist; });
-            builder.tmprepo.clean([dist], function(err) {
-              if(err) {
-                console.log('Error: cleaning tmp repo');
-                console.log(err.message);
-              }
-            });
-            console.log('Batch for', dist, 'canceled');
-          } else if(builder.queue[dist].length == 0) {
-            console.log('Batch for', dist, 'finished');
-            delete builder.queue[dist];
-            delete builder.status[dist];
-            builder.dists = builder.dists.filter(function(d) { return d != dist; });
-            builder.repo.cleanIncoming([dist], function(err) {
-              if(err) {
-                console.log('Error: cleaning main repo incoming dirs');
-                console.log(err.message);
-              } else {
-                builder.tmprepo.move(builder.repo, [dist], 'tmp-incoming', function(err) {
+      var batch = builder.current[dist];
+      console.log('Build for batch', batch.id, '('+dist+')', success ? 'succeeded' : 'failed');
+      if(!success) {
+        builder.switchBatch(dist, 'failed', function(err) {
+          if(err) console.log('Error: Batch switch failed');
+        });
+      } else {
+        builder.status[dist] = 0;
+        var outdir = Path.join(builder.outdir, batch.dist);
+        var donedir = Path.join(batch.dir, 'done');
+        var repodir = Path.join(batch.dir, 'repo', 'incoming');
+        Fs.readdir(outdir, function(err, files) {
+          if(err) {
+            console.log('Error: Pkg out listing failed');
+            console.log(err.message);
+          } else {
+            console.log('Moving pkgs to done & repo dir');
+            As.forEach(files, function(file, callback) {
+              var f = Path.join(outdir, file);
+              Fs.copy(f, Path.join(repodir, file), function(err) {
+                if(err) {
+                  console.log('Error: Pkg moving (repo) failed');
+                  console.log(err.message);
+                  callback(err);
+                } else {
+                  Fs.rename(f, Path.join(donedir, file), function(err) {
+                    if(err) {
+                      console.log('Error: Pkg moving (done) failed');
+                      console.log(err.message);
+                    }
+                    callback(err);
+                  });
+                }
+              });
+            }, function(err) {
+              if(err) return;
+              if(batch.list.length > 0) {
+                batch.repo.insert(function(err) {
                   if(err) {
-                    console.log('Error: moving files from tmp repo to main repo');
+                    console.log('Error: Repo insertion failed');
                     console.log(err.message);
                   } else {
-                    As.forEachSeries(builder.queue['tmp'], function(pkg, callback1) {
-                      As.forEachSeries(pkg.bins, function(bin, callback2) {
-                        builder.repo.remove(bin, [dist], callback2);
-                      }, callback1);
-                    }, function(err) {
+                    builder.queueBatch(batch, function(err) {
                       if(err) {
-                        console.log('Error: removing old packages from main repo');
+                        console.log('Error: Batch update failed');
+                        console.log(err.message);
+                      }
+                    })
+                  }
+                });
+              } else {
+                builder.repo[dist].cleanIncoming(function(err) {
+                  if(err) {
+                    console.log('Error: cleaning main repo incoming dirs');
+                    console.log(err.message);
+                  } else {
+                    var donedir = Path.join(batch.dir, 'done');
+                    var mainincoming = Path.join(builder.repo[dist].getDir(), 'incoming');
+                    Fs.readdir(donedir, function(err, files) {
+                      if(err) {
+                        console.log('Error: done dir listing failed');
                         console.log(err.message);
                       } else {
-                        if(builder.dists.length == 0) delete builder.queue['tmp'];
-                        builder.repo.insert([dist], function(err) {
+                        As.forEach(files, function(file, callback) {
+                          var from = Path.join(donedir, file);
+                          var to = Path.join(mainincoming, file);
+                          Fs.rename(from, to, function(err) {
+                            if(err) {
+                              console.log('Error: Pkg moving (mainrepo) failed');
+                              console.log(err.message);
+                            }
+                            callback(err);
+                          });
+                        }, function(err) {
                           if(err) {
-                            console.log('Error: inserting packages into main repo');
+                            console.log('Error: Moving packages to main repo incoming');
                             console.log(err.message);
+                          } else {
+                            As.forEachSeries(batch.done, function(pkg, callback1) {
+                              As.forEachSeries(pkg.bins, function(bin, callback2) {
+                                builder.repo[dist].remove(bin, false, callback2);
+                              }, function(err) {
+                                if(err) callback1(err);
+                                else builder.repo[dist].remove(pkg.name, false, callback1);
+                              });
+                            }, function(err) {
+                              if(err) {
+                                console.log('Error: removing old packages from main repo');
+                                console.log(err.message);
+                              } else {
+                                builder.repo[dist].insert(function(err) {
+                                  if(err) {
+                                    console.log('Error: inserting packages into main repo');
+                                    console.log(err.message);
+                                  } else {
+                                    builder.finishBatch(dist, function(err) {
+                                      if(err) {
+                                        console.log('Error: starting next batch');
+                                        console.log(err.message);
+                                      }
+                                    })
+                                  }
+                                });
+                              }
+                            });
                           }
                         });
                       }
@@ -207,65 +654,109 @@ exports.Builder.prototype.processBatch = function (type, dist, status) {
                 });
               }
             });
-          } else {
-            builder.start([dist]);
           }
-          break;
-        default:
-          console.log('Error: Invalid build type', type);
+        });
       }
       break;
-    default:
-      console.log('Error: Invalid build status');
   }
 }
 
-exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
+exports.Builder.prototype.cleanIncoming = function (pkgs, callbackFin) {
+  var builder = this;
+  As.forEach(pkgs, function(pkg, callback1) {
+    As.forEach(pkg.files, function (f, callback2) {
+      var file = Path.join(builder.incomedir, f.file);
+      Fs.unlink(file, callback2);
+    }, function(err) {
+      if(err) callback1(err);
+      else {
+        var file = Path.join(builder.incomedir, pkg.filename);
+        Fs.unlink(file, callback1);
+      }
+    });
+  }, callbackFin);
+}
+
+exports.Builder.prototype.preparePkgs = function (batch, pkgs, callbackFin) {
   var builder = this;
   console.log('prepare packages');
+  
   As.map(pkgs, function(pkg, callback1) {
     if(pkg.newpkg) {
-      As.series([
-        function(callback2) {
-          // move package files
-          As.forEach(pkg.files, function (f, callback3) {
-            var name = Path.basename(f.file);
-            var newPath = Path.join(builder.outputDir, name);
-            Fs.rename(f.file, newPath, function (err) {
-              if(err && err.code == 'ENOENT') {
-                Fs.stat(newPath, function(err2, stat) {
-                  if(err2) {
-                    console.log('error: '+name+' either in incoming nor working dir');
-                    callback3(err);
-                  } else {
-                    console.log('warning: '+name+' not in incoming but working dir');
-                    callback3(undefined);
+      
+      var returnError = function(msg, err, callback) {
+        console.log(msg);
+        console.log(err.message);
+        callback(err);
+      }
+      
+      var copy = function(name, incoming, batchdir, callback) {
+        Path.exists(batchdir, function(existsbatch) {
+          if(existsbatch) {
+            Path.exists(incoming, function(existsincoming) {
+              if(existsincoming) {
+                Fs.unlink(batchdir, function(err) {
+                  if(err)
+                    returnError('Error: failed to copy pkg', err, callback);
+                  else {
+                    Fs.copy(incoming, batchdir, function(err) {
+                      if(err)
+                        returnError('Error: failed to copy pkg', err, callback);
+                      else
+                        callback(undefined);
+                    });
                   }
                 });
               } else {
-                callback3(err);
+                console.log('Warning:', name, 'not in incoming but batch dir');
+                callback(undefined);
               }
             });
+          } else {
+            Path.exists(incoming, function(existsincoming) {
+              if(existsincoming) {
+                Fs.copy(incoming, batchdir, function(err) {
+                  if(err)
+                    returnError('Error: failed to copy pkg', err, callback);
+                  else
+                    callback(undefined);
+                });
+              } else {
+                var msg = 'Error: '+name+' neither in incoming nor batch dir';
+                returnError(msg, {message: msg}, callback);
+              }
+            });
+          }
+        })
+      }
+      
+      As.series([
+        // copy package files
+        function(callback2) {
+          As.forEach(pkg.files, function (f, callback3) {
+            var incoming = Path.join(builder.incomedir, f.file);
+            var batchdir = Path.join(batch.dir, 'incoming', f.file);
+            copy(f.file, incoming, batchdir, callback3);
           }, callback2);
         },
+        // copy the dsc file itself
         function(callback2) {
-          // move the dsc file itself
-          var newDscPath = Path.join(builder.outputDir, pkg.filename);
-          Fs.rename(Path.join(builder.inputDir, pkg.filename), newDscPath, function(err) {
-            callback2(err);
-          });
-        }], function(err, results) {
+          var incoming = Path.join(builder.incomedir, pkg.filename);
+          var batchdir = Path.join(batch.dir, 'incoming', pkg.filename);
+          copy(pkg.filename, incoming, batchdir, callback2);
+        }],
+        function(err, results) {
           callback1(err, pkg);
         });
     } else {
       var pkgfilename = pkg.name+'_'+pkg.version+'.tar.gz';
-      var pkgfile = Path.join(builder.outputDir, pkgfilename);
-      var extdir = Path.join(builder.outputDir, pkg.name);
+      var pkgfile = Path.join(builder.workdir, pkgfilename);
+      var extdir = Path.join(builder.workdir, pkg.name);
       
       var modifyDSC = function(tarfile, newname, version) {
         var oldname = pkg.name+'_'+pkg.version;
-        var olddsc = Path.join(builder.outputDir, oldname+'.dsc');
-        var newdsc = Path.join(builder.outputDir, newname+'.dsc');
+        var olddsc = Path.join(builder.workdir, oldname+'.dsc');
+        var newdsc = Path.join(builder.workdir, newname+'.dsc');
         Fs.readFile(olddsc, 'utf8', function (err, content) {
           Cp.exec('md5sum '+tarfile, function (error, stdout, stderr) {
             if(error) callback1({message: stderr});
@@ -297,7 +788,7 @@ exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
       
       var repack = function(subdir, version) {
         var newname = pkg.name+'_'+version;
-        var newtar = Path.join(builder.outputDir, newname+'.tar.gz');
+        var newtar = Path.join(builder.workdir, newname+'.tar.gz');
         Cp.exec('tar -czC '+extdir+' -f '+newtar+' '+subdir,
           function (error, stdout, stderr) {
             if(error) callback1({message: stderr});
@@ -424,10 +915,10 @@ exports.Builder.prototype.preparePkgs = function (pkgs, callbackFin) {
   }, callbackFin);
 }
 
-exports.Builder.prototype.getBuildList = function (dep, dist, pkgs, callback) {
+exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
   var builder = this;
   var buildlist = clone(pkgs);
-  switch(dep) {
+  switch(mode) {
     case 0: // nodep
       console.log('Disabled dependency check');
       callback(false, buildlist);
@@ -441,13 +932,13 @@ exports.Builder.prototype.getBuildList = function (dep, dist, pkgs, callback) {
     case 3: // show deps
     case 2: // rebuild
       console.log('Generating dependency list');
-      getRepoPkgs(dist, builder.repo.getDir(), builder.repo.getArch(), function(err, repo) {
+      getRepoPkgs(dist, builder.repo[dist].getDir(), builder.repo[dist].getArch(), function(err, repopkgs) {
         if(err) {
           callback(err, []);
           return;
         }
-        buildlist = getRebuildPkgs(repo, buildlist);
-        var list = sort(depdel(dep==3?true:false, buildlist));
+        buildlist = getRebuildPkgs(repopkgs, buildlist);
+        var list = sort(depdel(mode==3?true:false, buildlist));
         if(!list) callback({message: 'dependency cycle'}, []);
         else callback(false, list);
       });
@@ -457,28 +948,34 @@ exports.Builder.prototype.getBuildList = function (dep, dist, pkgs, callback) {
 
 function getRepoPkgs(dist, repoDir, arch, callback) {
   console.log('read repo content file');
-  var contentfile = Path.join(repoDir, dist, 'dists', dist, 'main', 'binary-'+arch, 'Packages');
+  var contentfile = Path.join(repoDir, 'dists', dist, 'main', 'binary-'+arch, 'Packages');
   Fs.readFile(contentfile, 'utf8', function(err, data) {
     if(err) {
       callback(err, []);
       return;
     }
     console.log('parse packages and dependencies');
-    var name, version, repo = [];
+    var name, version, repo = [], deps = [], bins = [], gotpkg = false;
+    var parseList = function(list) {
+      return list.split(', ').map(function(pkg) {
+        if(pkg.match(/^(.*) \((.*) (.*)\)$/))
+          return {name: RegExp['$1'], op: RegExp['$2'], version: RegExp['$3']};
+        else return pkg;
+      });
+    }
     data.split('\n').forEach(function(line) {
+      if(gotpkg && line.match('/^\S')) {
+          console.log({name: name, version: version, deps: deps, bins: bins, newpkg: false});
+        repo.push({name: name, version: version, deps: deps, bins: bins, newpkg: false});
+        gotpkg = false;
+        return;
+      }
       line.match(/^([^:]+): (.*)/);
       switch(RegExp['$1']) {
-        case 'Package': name = RegExp['$2']; break;
-        case 'Version': version = RegExp['$2']; break;
-        case 'Depends':
-          var deps = RegExp['$2'].split(', ');
-          deps = deps.map(function(dep) {
-            if(dep.match(/^(.*) \((.*) (.*)\)$/))
-              return {name: RegExp['$1'], op: RegExp['$2'], version: RegExp['$3']};
-            else return dep;
-          });
-          repo.push({name: name, version: version, deps: deps, newpkg: false});
-          break;
+        case 'Package': name = RegExp['$2']; gotpkg = true; break;
+        case 'Version': version = RegExp['$2']; gotpkg = true; break;
+        case 'Depends': deps = parseList(RegExp['$2']); gotpkg = true; break;
+        case 'Binary':  bins = parseList(RegExp['$2']); gotpkg = true; break;
       }
     });
     callback(false, repo);

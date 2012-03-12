@@ -6,6 +6,13 @@ exports.Server = function (host, port) {
   this.queue = [];
   this.lock = false;
   this.reconnect();
+  this.callback = undefined;
+  this.callbackData = undefined;
+}
+
+exports.Server.prototype.setCallback = function (callback) {
+  this.callback = callback;
+  console.log('registered rebuildd callback');
 }
 
 exports.Server.prototype.reconnect = function () {
@@ -23,7 +30,10 @@ exports.Server.prototype.reconnect = function () {
 
   self.socket.on('data', function (data) {
     var output = stripPrompt(data, "<< ");
-    if (output != '') { console.log(output); }
+    if (output != '') {
+      console.log(output);
+      self.callback(output, self.callbackData);
+    }
   });
   
   self.socket.on('error', function (exn) {
@@ -41,27 +51,36 @@ exports.Server.prototype.reconnect = function () {
   });
 }
 
-exports.Server.prototype.sendCmd = function (cmd) {
-  console.log(">>", cmd);
-  this.socket.write(cmd + "\n");
-}
-
-exports.Server.prototype.queuePackage = function (name, version, dist, priority) {
-  this.queue.push({name: name, version: version, dist: dist, priority: priority});
+exports.Server.prototype.queueCmd = function (cmd) {
+  this.queue.push(cmd);
   if(this.lock) return;
-  this.addJob();
+  this.sendCmd();
 }
 
-exports.Server.prototype.addJob = function () {
+exports.Server.prototype.sendCmd = function () {
   if(this.queue.length == 0) {
     this.lock = false;
     return;
   }
   this.lock = true;
-  var pkg = this.queue.pop();
+  var cmd = this.queue.pop();
+  console.log(">>", cmd);
+  this.socket.write(cmd + "\n");
   var server = this;
-  server.sendCmd(['job', 'add', pkg.name, pkg.version, pkg.priority, pkg.dist].join(' '));
-  setTimeout(function() { server.addJob(); }, 500);
+  setTimeout(function() { server.sendCmd(); }, 500);
+}
+
+exports.Server.prototype.addJob = function (name, version, dist, priority, callback) {
+  var cmd = ['job', 'add', name, version, priority, dist].join(' ');
+  this.callbackData = callback;
+  this.queueCmd(cmd);
+}
+
+exports.Server.prototype.cancelJob = function (id, callback) {
+  if(!id) return;
+  var cmd = ['job', 'cancel', id].join(' ');
+  this.callbackData = callback;
+  this.queueCmd(cmd);
 }
 
 function stripPrompt(data, prefix) {
