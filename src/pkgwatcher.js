@@ -1,9 +1,6 @@
 var FS      = require('fs'),
     Path    = require('path'),
-    Events  = require('events'),
-    Inotify = require('inotify').Inotify;
-
-var inotify = new Inotify();
+    Events  = require('events');
 
 /* returns an event emitter
  * watch inputDir for source packages
@@ -13,25 +10,20 @@ var inotify = new Inotify();
  */
 exports.watchDir = function (inputDir) {
   var emitter = new Events.EventEmitter;
-  var watchDir = {
-    path: inputDir,
-    callback: function (evt) { handleFSEvent(evt, inputDir, emitter); },
-    watch_for: Inotify.IN_CLOSE_WRITE | Inotify.IN_MOVED_TO,
-  };
-  inotify.addWatch(watchDir);
+  FS.watch(inputDir, function(evt, name) {
+    if(name && evt == "change")
+      handleFSEvent(inputDir, name, emitter);
+  });
   return emitter;
 }
 
 /* holds the dsc files that are currently being added */
 var currentPackages = {};
 
-function handleFSEvent (event, inputDir, emitter) {
-  var mask = event.mask;
-  var name = event.name;
-  var isDir = mask & Inotify.IN_ISDIR;
-
-  if (!isDir) {
-    var path = Path.join(inputDir, name);
+function handleFSEvent (inputDir, name, emitter) {
+  var path = Path.join(inputDir, name);
+  var stat = FS.statSync(path);
+  if(!stat.isDirectory()) {
     console.log('new file: ' + path);
 
     switch (Path.extname(name)) {
@@ -71,7 +63,10 @@ function processPackages (inputDir, packages, emitter) {
 
 function dscFileComponents (file, callback) {
   FS.readFile(file, 'utf8', function (err, content) {
-    if(err) callback(err, undefined);
+    if(err) {
+      callback(err, undefined);
+      return;
+    }
     
     var filename = Path.basename(file);
     filename.match(/^([^_]+)_(.*)\.dsc$/);
@@ -81,7 +76,7 @@ function dscFileComponents (file, callback) {
 
     lines.forEach(function (line) {
       if (line.match(/^Build-Depends: (.*)$/)) {
-	    pkgObj.deps = RegExp['$1'].split(', ');
+	    pkgObj.deps = RegExp['$1'];
       }
       else if (line.match(/^Binary: (.*)$/)) {
 	    pkgObj.bins = RegExp['$1'].split(', ');

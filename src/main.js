@@ -347,19 +347,9 @@ function cli(data, callback) {
         if(error) {
           callback('error during dependency generation\n'+error.message+'\n');
         } else {
-          list.forEach(function(pkg) {
-            if(pkg.newpkg) callback(' new: ');
-            else callback('repo: ');
-            callback(pkg.name+' '+pkg.version+' [');
-            if(pkg.depssave.length > 0) {
-              if(pkg.depssave[0].name) callback(pkg.depssave[0].name+' ('+pkg.depssave[0].op+' '+pkg.depssave[0].version+')');
-              else callback(pkg.depssave[0]);
-              pkg.depssave.slice(1).forEach(function(dep) {
-                if(dep.name) callback(', '+dep.name+' ('+dep.op+' '+dep.version+')');
-                else callback(', '+dep);
-              });
-            }
-            callback(']\n');
+          builder.showPackages(true, list, function(pkg, str) {
+            if(pkg.newpkg) callback(' new: '+str+'\n');
+            else callback('repo: '+str+'\n');
           });
         }
         callback('> ');
@@ -388,6 +378,7 @@ function cli(data, callback) {
         var name = batch.pkg ? batch.pkg.name : "";
         var dist = batch.dist+genChars(distlen-batch.dist.length, ' ');
         var mode = modes[batch.mode];
+        if(mode.length < 4) mode += '\t';
         callback(batch.id+'\t'+dist+mode+'\t'+batch.status);
         callback('\t'+batch.list.length+'\t'+name+'\n');
       });

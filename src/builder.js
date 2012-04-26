@@ -1,6 +1,7 @@
 var Repo        = require(__dirname + '/repo.js'),
     Rebuildd    = require(__dirname + '/rebuildd.js'),
     PkgWatcher  = require(__dirname + '/pkgwatcher.js'),
+    Builder     = require(__dirname + '/builder.js'),
     As          = require('async'),
     Path        = require('path'),
     Cp          = require('child_process'),
@@ -279,21 +280,16 @@ exports.Builder.prototype.cont = function (id, pkglist, callbackFin) {
   else {
     if(batch.status == 'stopped' || batch.status == 'failed') {
       builder.lock(function(callback) {
-          console.log('pkglist', pkglist);
         var list = batch.list.concat(batch.done);
-        console.log('list', list);
         list = list.filter(function(opkg) {
           var found = false;
           pkglist.every(function(npkg) {
-              console.log(opkg.name, 'vs', npkg.name);
             if(opkg.name == npkg.name) found = true;
             return !found;
           });
           return !found;
         });
-        console.log('list', list);
         var restlist = list.concat(pkglist);
-        console.log('restlist', restlist);
         var restart = {name: batch.pkg.name, newlist: pkglist};
         builder.startNoInit(batch, restlist, restart, callback);
       }, callbackFin);
@@ -917,7 +913,18 @@ exports.Builder.prototype.preparePkgs = function (batch, pkgs, callbackFin) {
 
 exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
   var builder = this;
-  var buildlist = clone(pkgs);
+  var buildlist;
+  try {
+    buildlist = clone(pkgs).map(function(pkg) {
+      pkg.deps = parseDependencies(pkg.name, pkg.deps);
+      if(isObject(pkg.deps))
+          throw pkg.deps;
+      return pkg;
+    });
+  } catch(e) {
+    callback(e, []);
+    return;
+  }
   switch(mode) {
     case 0: // nodep
       console.log('Disabled dependency check');
@@ -925,7 +932,7 @@ exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
       break;
     case 1: // dep
       console.log('Generating dependency list, but skipping repo');
-      var list = sort(depdel(false, buildlist));
+      var list = sort(depdel(false, buildlist), builder);
       if(!list) callback({message: 'dependency cycle'}, []);
       else callback(false, list);
       break;
@@ -938,12 +945,59 @@ exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
           return;
         }
         buildlist = getRebuildPkgs(repopkgs, buildlist);
-        var list = sort(depdel(mode==3?true:false, buildlist));
+        var del = depdel(mode==3 ? true : false, buildlist);
+        var list = sort(del, builder);
         if(!list) callback({message: 'dependency cycle'}, []);
         else callback(false, list);
       });
       break;
   }
+}
+
+exports.Builder.prototype.showPackages = function (depssave, list, callback) {
+  list.forEach(function(pkg) {
+    var deps;
+    if(depssave) deps = pkg.depssave;
+    else deps = pkg.deps;
+    
+    var str = pkg.name+' '+pkg.version+' - [';
+    if(deps.length > 0) {
+      if(deps[0].length > 0) {
+        if(deps[0][0].version)
+          str += deps[0][0].name+" ("+deps[0][0].op+" "+deps[0][0].version+")";
+        else
+          str += deps[0][0].name;
+      }
+      if(deps[0].length > 1) {
+        deps[0].slice(1).forEach(function(alt) {
+          if(alt.version)
+            str += '|'+alt.name+" ("+alt.op+" "+alt.version+")";
+          else
+            str += '|'+alt.name;
+        });
+      }
+    }
+    if(deps.length > 1) {
+      deps.slice(1).forEach(function(dep) {  
+        str += ', ';
+        if(dep.length > 0) {
+          if(dep[0].version)
+            str += dep[0].name+" ("+dep[0].op+" "+dep[0].version+")";
+          else
+            str += dep[0].name;
+        }
+        if(dep.length > 1) {
+          dep.slice(1).forEach(function(alt) {
+            if(alt.version)
+              str += '|'+alt.name+" ("+alt.op+" "+alt.version+")";
+            else
+              str += '|'+alt.name;
+          });
+        }
+      });
+    }
+    callback(pkg, str+']');
+  });
 }
 
 function getRepoPkgs(dist, repoDir, arch, callback) {
@@ -956,29 +1010,32 @@ function getRepoPkgs(dist, repoDir, arch, callback) {
     }
     console.log('parse packages and dependencies');
     var name, version, repo = [], deps = [], bins = [], gotpkg = false;
-    var parseList = function(list) {
-      return list.split(', ').map(function(pkg) {
-        if(pkg.match(/^(.*) \((.*) (.*)\)$/))
-          return {name: RegExp['$1'], op: RegExp['$2'], version: RegExp['$3']};
-        else return pkg;
+    try {
+      data.split('\n').forEach(function(line) {
+        if(gotpkg && line.match(/^[ ]*$/)) {
+          repo.push({name: name, version: version, deps: deps, bins: bins, newpkg: false});
+          gotpkg = false;
+          return;
+        }
+        line.match(/^([^:]+): (.*)/);
+        switch(RegExp['$1']) {
+          case 'Package': name = RegExp['$2']; gotpkg = true; break;
+          case 'Version': version = RegExp['$2']; gotpkg = true; break;
+          case 'Depends':
+              deps = parseDependencies(name, RegExp['$2']);
+              if(isObject(deps)) {
+                throw(deps);
+              } else {
+                gotpkg = true;
+                break;
+              }
+          case 'Binary':  bins = RegExp['$2'].split(', '); gotpkg = true; break;
+        }
       });
+      callback(false, repo);
+    } catch(e) {
+      callback(e, []);
     }
-    data.split('\n').forEach(function(line) {
-      if(gotpkg && line.match('/^\S')) {
-          console.log({name: name, version: version, deps: deps, bins: bins, newpkg: false});
-        repo.push({name: name, version: version, deps: deps, bins: bins, newpkg: false});
-        gotpkg = false;
-        return;
-      }
-      line.match(/^([^:]+): (.*)/);
-      switch(RegExp['$1']) {
-        case 'Package': name = RegExp['$2']; gotpkg = true; break;
-        case 'Version': version = RegExp['$2']; gotpkg = true; break;
-        case 'Depends': deps = parseList(RegExp['$2']); gotpkg = true; break;
-        case 'Binary':  bins = parseList(RegExp['$2']); gotpkg = true; break;
-      }
-    });
-    callback(false, repo);
   });
 }
 
@@ -995,13 +1052,27 @@ function getRebuildPkgs(repo, buildlist) {
           found = true;
           return false;
         }
-        repopkg.deps.every(function(dep) {
-          if((dep.name && dep.name == pkg.name) || (!dep.name && dep == pkg.name)) { // todo: use version
-            console.log('>', repopkg.name, 'found to rebuild for', pkg.name);
-            found = true;
-            depfound = true;
-            buildlist.push(repopkg);
-            return false;
+        // check whether pkg is dep of repopkg
+        groupDependencies(repopkg.deps).every(function(dep) {
+          if(dep.name == pkg.name) {
+            var cmds = dep.rules.map(function(rule) {
+              if(!rule.version)
+                return true;
+              else
+                return compareStr(pkg.version, rule.op, rule.version);
+            });
+            var res = syncExecs(cmds, "0");
+            var match = res.every(function(ret) {
+              return ret == "0";
+            });
+            if(match) {
+              console.log('>', repopkg.name, 'found to rebuild for', pkg.name);
+              found = true;
+              depfound = true;
+              buildlist.push(repopkg);
+              return false;
+            }
+            return true;
           }
           return true;
         });
@@ -1013,26 +1084,99 @@ function getRebuildPkgs(repo, buildlist) {
   return buildlist;
 }
 
+// [[{name: "", op: "", version: ""}]] -> [{name: "", rules: [{op: "", version: ""}]}]
+
+function groupDependencies(deps) {
+  var grouped = [];
+  deps.forEach(function(dep) {
+    dep.forEach(function(alt) {
+      var found = false;
+      grouped = grouped.map(function(g) {
+        if(g.name == alt.name) {
+          g.rules.push({op: alt.op, version: alt.version});
+          found = true;
+        }
+        return g;
+      });
+      if(!found)
+        grouped.push({name: alt.name, rules: [{op: alt.op, version: alt.version}]});
+    });
+  });
+  return grouped;
+}
+
+// "" -> {name: "", op: "", version: ""} | false
+
+function parseDependency(string) {
+  if(string.match(/^[ ]*([^ ]+)[ ]*\([ ]*(<<|<|<=|=|>=|>|>>)[ ]*([^ ]+)[ ]*\)[ ]*$/)) {
+    var r1 = RegExp['$1'], r2 = RegExp['$2'], r3 = RegExp['$3'];
+    return {name: r1, op: r2, version: r3};
+  }
+  if(string.match(/^[ ]*([^ \(]+)[ ]*$/)) {
+    var r1 = RegExp['$1'];
+    return {name: r1, op: "", version: ""};
+  }
+  return false;
+}
+
+// "" -> [[{name: "", op: "", opf: fun, version: ""}]] | {message: ""}
+
+function parseDependencies(pkgname, string) {
+  try {
+    return string.split(', ').map(function(dep) {
+      var alts = [], last = "";
+      while(true) {
+        if(dep.match(/^([^|]*)\|(.*)$/)) {
+          var r1 = RegExp['$1'], r2 = RegExp['$2'];
+          var alt = parseDependency(r1);
+          if(alt) {
+            alts.push(alt);
+            dep = r2;
+            last = alt.name;
+            continue;
+          } else {
+            throw(r1);
+          }
+        }
+        var alt = parseDependency(dep);
+        if(alt) {
+          alts.push(alt);
+          break;
+        } else {
+          throw(dep);
+        }
+      }
+      return alts;
+    });
+  } catch(e) {
+    return {message: 'Error: Malformed dependency for package '+pkgname+': '+e};
+  }
+}
+
 function depdel(depssave, buildlist) {
   console.log('delete dependencies which are not in buildlist');
   return buildlist.map(function(pkg) {
     pkg.deps = pkg.deps.filter(function(dep) {
-      var found = false;
-      buildlist.every(function(pkg) {
-        if((dep.name && dep.name == pkg.name) || (!dep.name && dep == pkg.name)) {
-          found = true;
-          return false;
-        }
-        return true;
+      var alts = dep.filter(function(alt) {
+        var found = false;
+        buildlist.every(function(pkg) {
+          if(alt.name == pkg.name) {
+            found = true;
+            return false;
+          }
+          return true;
+        });
+        return found;
       });
-      return found;
+      return alts.length > 0;
     });
-    if(depssave) pkg.depssave = pkg.deps;
+    if(depssave)
+        pkg.depssave = pkg.deps;
     return pkg;
   });
 }
 
-function sort(tmpbuildlist) {
+function sort(tmpbuildlist, builder) {
   console.log('sort tmpbuildlist');
   var buildlist = [], removelist = [];
   while(tmpbuildlist.length > 0) {
@@ -1041,7 +1185,7 @@ function sort(tmpbuildlist) {
     tmpbuildlist = tmpbuildlist.filter(function(pkg) {
       if(pkg.deps.length == 0) {
         buildlist.push(pkg);
-        removelist.push(pkg.name);
+        removelist.push(pkg);
         found = true;
         return false;
       }
@@ -1050,17 +1194,8 @@ function sort(tmpbuildlist) {
     // if no package is found we've got a dependency cycle
     if(!found) {
       console.log('dependency cycle with');
-      tmpbuildlist.forEach(function(pkg) {
-        var str = '> '+pkg.name+' - [';
-        if(pkg.deps.length > 0) {
-          if(pkg.deps[0].name) str += ', '+pkg.deps[0].name;
-          else str += ', '+pkg.deps[0];
-          pkg.deps.slice(1).forEach(function(dep) {
-            if(dep.name) str += ', '+dep.name;
-            else str += ', '+dep;
-          });
-        }
-        console.log(str+']');
+      builder.showPackages(false, tmpbuildlist, function(pkg, str) {
+        console.log('> '+str);
       });
       return false;
     }
@@ -1068,9 +1203,20 @@ function sort(tmpbuildlist) {
     tmpbuildlist = tmpbuildlist.map(function(pkg) {
       pkg.deps = pkg.deps.filter(function(dep) {
         var subfound = false;
-        removelist.every(function(rem) {
-          if((dep.name && dep.name == rem) || (!dep.name && dep == rem))
-            subfound = true;
+        dep.every(function(alt) {
+          removelist.every(function(rem) {
+            if(alt.name == rem.name) {
+              if(!alt.version)
+                subfound = true;
+              else {
+                var cmd = compareStr(rem.version, alt.op, alt.version);
+                var res = syncExecs([cmd], "0");
+                if(res == "0")
+                  subfound = true;
+              }
+            }
+            return !subfound;
+          });
           return !subfound;
         });
         return !subfound;
@@ -1095,5 +1241,48 @@ function clone(x) {
     return r;
   }
   return x;
+}
+
+function isObject(x) {
+  return x.constructor == Object;
+}
+
+function isArray(x) {
+  return x.constructor == Array;
+}
+
+function compareStr(v1, op, v2) {
+    return 'dpkg --compare-versions "'+v1+'" "'+op+'" "'+v2+'"; echo -n $?';
+}
+
+function syncExecs(cmds, def) {
+  var res = [];
+  var count = cmds.length, done = 0;
+  for(var i=0; i<count; i++) {
+    if(cmds[i] == true) {
+      res[i] = def;
+      done++;
+    } else {
+      Cp.exec(cmds[i] + " > /tmp/pkg_stdout_"+i+"; echo done > /tmp/pkg_done_"+i);
+      res[i] = false;
+    }
+  }
+  count -= done;
+  while(count > 0) {
+    for(var i=0; i<cmds.length; i++) {
+      if(!res[i]) {
+        try {
+          var status = Fs.readFileSync("/tmp/pkg_done_"+i, 'utf8');
+          if(status.trim() == "done") {
+            res[i] = Fs.readFileSync("/tmp/pkg_stdout_"+i, 'utf8');
+            Fs.unlinkSync("/tmp/pkg_stdout_"+i);
+            Fs.unlinkSync("/tmp/pkg_done_"+i);
+            count--;
+          }
+        } catch(e) {}
+      }
+    }
+  }
+  return res;
 }
 
