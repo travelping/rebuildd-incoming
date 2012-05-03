@@ -140,8 +140,10 @@ exports.main = function () {
   
   console.log('Watching Directory:', incomingDir);
   PkgWatcher.watchDir(incomingDir).on('package', function(pkg) {
-    pkg.newpkg = true;
-    readyList.push(pkg);
+    if(readyList.every(function(p) { return p.name != pkg.name; })) {
+      pkg.newpkg = true;
+      readyList.push(pkg);
+    }
   });
   
   var repo = [];
@@ -347,7 +349,7 @@ function cli(data, callback) {
         if(error) {
           callback('error during dependency generation\n'+error.message+'\n');
         } else {
-          builder.showPackages(true, list, function(pkg, str) {
+          builder.showPackages(list, function(pkg, str) {
             if(pkg.newpkg) callback(' new: '+str+'\n');
             else callback('repo: '+str+'\n');
           });

@@ -11,8 +11,10 @@ var FS      = require('fs'),
 exports.watchDir = function (inputDir) {
   var emitter = new Events.EventEmitter;
   FS.watch(inputDir, function(evt, name) {
-    if(name && evt == "change")
-      handleFSEvent(inputDir, name, emitter);
+    if(name && evt == "rename") {
+      if(Path.existsSync(Path.join(inputDir, name)))
+        handleFSEvent(inputDir, name, emitter);
+    }
   });
   return emitter;
 }
@@ -70,7 +72,7 @@ function dscFileComponents (file, callback) {
     
     var filename = Path.basename(file);
     filename.match(/^([^_]+)_(.*)\.dsc$/);
-    var pkgObj = { files: [], deps: [], bins: [], name: RegExp['$1'], filename: filename, version: RegExp['$2'] };
+    var pkgObj = { files: [], deps: [], bins: [], arch: "", name: RegExp['$1'], filename: filename, version: RegExp['$2'] };
     var lines = content.split('\n');
     var inFileSection = false;
 

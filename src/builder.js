@@ -93,12 +93,12 @@ exports.Builder.prototype.recover = function (callbackFin) {
         if(err) { callbackFin(err); return; }
         var count = 0;
         var batch = {
-          id: file,
+          id: parseInt(file),
           dir: Path.join(builder.batchdir, file),
           dist: undefined,
           status: undefined,
-          pkg: undefined,
           job: undefined,
+          pkg: undefined,
           mode: 0,
           list: [],
           done: [],
@@ -115,15 +115,11 @@ exports.Builder.prototype.recover = function (callbackFin) {
                 ++count;
                 break;
             case 2:
-                batch.pkg = line;
-                ++count;
-                break;
-            case 3:
                 batch.mode = parseInt(line);
                 ++count;
           }
         });
-        if(count != 4) { callbackFin({message: "info incomplete"}); return; }
+        if(count != 3) { callbackFin({message: "info incomplete"}); return; }
         var incoming = Path.join(builder.batchdir, file, 'incoming');
         Fs.readdir(incoming, function(err, files) {
           if(err) { callbackFin(err); return; }
@@ -137,22 +133,11 @@ exports.Builder.prototype.recover = function (callbackFin) {
               });
             } else callback(undefined);
           }, function(bla) {
-            builder.getBuildList(3, batch.dist, batch.list, function(err, list) {
-              batch.list.length = 0;
-              batch.list = list;
-              if(batch.pkg == 'none') batch.pkg = undefined;
-              else {
-                while(batch.list[0] && batch.pkg != batch.list[0].name)
-                  batch.done.push(batch.list.shift());
-                batch.pkg = batch.list.shift();
-                batch.done.push(batch.pkg);
-              }
-              var repo = Path.join(builder.batchdir, file, 'repo');
-              batch.repo = new Repo.Manager(batch.id, repo, batch.dist,
-                builder.arch, builder.reposcript);
-              builder.batch.push(batch);
-              if(batch.id > builder.idcounter) builder.idcounter = batch.id;
-            });
+            var repo = Path.join(builder.batchdir, file, 'repo');
+            batch.repo = new Repo.Manager(batch.id, repo, batch.dist, builder.arch, builder.reposcript);
+            builder.batch.push(batch);
+            if(batch.id > builder.idcounter)
+              builder.idcounter = batch.id;
           });
         });
       });
@@ -160,6 +145,8 @@ exports.Builder.prototype.recover = function (callbackFin) {
     callbackFin(undefined);
   });
 }
+
+// init and start batch, lock builder during operation
 
 exports.Builder.prototype.init = function (dist, mode, pkglist, callbackFin) {
   var builder = this;
@@ -178,17 +165,21 @@ exports.Builder.prototype.init = function (dist, mode, pkglist, callbackFin) {
         callback(err);
         return;
       }
-      builder.startNoInit(batch, pkglist, undefined, callback);
+      builder.startNoInit(batch, pkglist, false, callback);
     });
   }, callbackFin);
 }
 
+// start batch, lock builder during operation
+
 exports.Builder.prototype.start = function (batch, pkglist, callbackFin) {
   var builder = this;
   builder.lock(function(callback) {
-    startNoInit(batch, pkglist, undefined, callback);
+    startNoInit(batch, pkglist, false, callback);
   }, callbackFin);
 }
+
+// start batch
 
 exports.Builder.prototype.startNoInit = function (batch, pkglist, restart, callback) {
   var builder = this;
@@ -220,47 +211,19 @@ exports.Builder.prototype.startNoInit = function (batch, pkglist, restart, callb
       }
       batch.list = pkgs;
       batch.done = [];
-      
-      var start = function(err) {
+      if(!restart)
+        builder.batch.push(batch);
+      builder.startBatch(batch, function(err) {
         if(err) {
           if(!restart) {
             removeBatch();
             builder.batch.pop();
           }
-          returnError('Error: cleaning batch repo', 6, err, callback);
+          returnError('Error: starting batch', 5, err, callback);
           return;
         }
-        builder.startBatch(batch, function(err) {
-          if(err) {
-            if(!restart) {
-              removeBatch();
-              builder.batch.pop();
-            }
-            returnError('Error: starting batch', 5, err, callback);
-            return;
-          }
-          callback(undefined);
-        });
-      }
-      
-      if(restart) {
-        while(batch.list[0]) {
-          if(batch.list[0].name == restart.name) break;
-          var found = false;
-          restart.newlist.every(function(npkg) {
-            if(batch.list[0].name == npkg.name) found = true;
-            return !found;
-          });
-          if(found) break;
-          batch.done.push(batch.list.shift());
-        }
-        As.forEachSeries(batch.list, function(pkg, callback1) {
-          batch.repo.remove(pkg.name, true, callback1);
-        }, start);
-      } else {
-        builder.batch.push(batch);
-        start(undefined);
-      }
+        callback(undefined);
+      });
     });
   });
 }
@@ -281,6 +244,9 @@ exports.Builder.prototype.cont = function (id, pkglist, callbackFin) {
     if(batch.status == 'stopped' || batch.status == 'failed') {
       builder.lock(function(callback) {
         var list = batch.list.concat(batch.done);
+        batch.list = [];
+        batch.done = [];
+        // remove pkgs from old buildlist which are in new buildlist
         list = list.filter(function(opkg) {
           var found = false;
           pkglist.every(function(npkg) {
@@ -289,9 +255,7 @@ exports.Builder.prototype.cont = function (id, pkglist, callbackFin) {
           });
           return !found;
         });
-        var restlist = list.concat(pkglist);
-        var restart = {name: batch.pkg.name, newlist: pkglist};
-        builder.startNoInit(batch, restlist, restart, callback);
+        builder.startNoInit(batch, list.concat(pkglist), true, callback);
       }, callbackFin);
     } else
       callbackFin({message: 'Error: Batch already active'});
@@ -401,8 +365,7 @@ exports.Builder.prototype.linkBatch = function(batch, callback) {
 
 exports.Builder.prototype.updateBatch = function (batch, callback) {
   var info = Path.join(batch.dir, 'info');
-  var name = batch.pkg ? batch.pkg.name : 'none';
-  Fs.writeFile(info, batch.dist+'\n'+batch.status+'\n'+name+'\n'+batch.mode, callback);
+  Fs.writeFile(info, batch.dist+'\n'+batch.status+'\n'+batch.mode, callback);
 }
 
 exports.Builder.prototype.startBatch = function (batch, callbackFin) {
@@ -422,7 +385,7 @@ exports.Builder.prototype.startBatch = function (batch, callbackFin) {
     console.log(msg);
     callbackFin({message: msg});
     var i = builder.batch.indexOf(batch);
-    builder.batch.splice(i, i);
+    builder.batch.splice(i, i+1);
     return;
   }
   As.forEach(batch.list, function(pkg, callback1) {
@@ -469,18 +432,50 @@ exports.Builder.prototype.startBatch = function (batch, callbackFin) {
   });
 }
 
-exports.Builder.prototype.queueBatch = function (batch, callback) {
+exports.Builder.prototype.queueBatch = function (batch, callbackFin) {
   var builder = this;
-  var pkg = batch.list.shift();
-  batch.done.push(pkg);
-  batch.status = 'build';
-  batch.pkg = pkg;
-  batch.job = undefined;
-  builder.status[batch.dist] = 1;
-  builder.rebuildd.addJob(pkg.name, pkg.version, batch.dist, builder.priority, function(err) {
-    if(err) { callback(err); return; }
-    builder.updateBatch(batch, callback);
-  });
+  var pkg;
+  var testDone = function(p, callback) {
+    var version2 = p.version.replace(/[^:]*:/, "");
+    var bins = clone(p.bins);
+    Fs.readdir(Path.join(batch.dir, "done"), function(err, files) {
+      if(err) { callback(err, false); return; }
+      files.forEach(function(file) {
+        if(file.match(/^([^_]+)_([^_]+)_[^_]+\.deb$/)) {
+          var r1 = RegExp['$1'], r2 = RegExp['$2'];
+          bins = bins.map(function(bin) {
+            if(!bin) return false;
+            if(bin == r1 && (p.version == r2 || version2 == r2)) return false;
+            return bin;
+          });
+        }
+      });
+      callback(undefined, bins.every(function(b) { return !b; }));
+    });
+  };
+  var exec = function() {
+    pkg = batch.list.shift();
+    batch.done.push(pkg);
+    testDone(pkg, function(err, done) {
+      if(err) {
+        callbackFin(err);
+        return;
+      }
+      if(done)
+        exec ();
+      else {
+        batch.status = 'build';
+        batch.pkg = pkg;
+        batch.job = undefined;
+        builder.status[batch.dist] = 1;
+        builder.rebuildd.addJob(pkg.name, pkg.version, batch.dist, builder.priority, function(err) {
+          if(err) { callbackFin(err); return; }
+          builder.updateBatch(batch, callbackFin);
+        });
+      }
+    });
+  }
+  exec();
 }
 
 exports.Builder.prototype.switchBatch = function (dist, status, callback) {
@@ -488,6 +483,7 @@ exports.Builder.prototype.switchBatch = function (dist, status, callback) {
   var batch = builder.current[dist];
   builder.status[dist] = 0;
   batch.status = status;
+  batch.list.unshift(batch.done.pop());
   builder.updateBatch(batch, function(err) {
     if(err) { callback(err); return; }
     for(var i=0; i<builder.batch.length; i++) {
@@ -704,7 +700,7 @@ exports.Builder.prototype.preparePkgs = function (batch, pkgs, callbackFin) {
                   }
                 });
               } else {
-                console.log('Warning:', name, 'not in incoming but batch dir');
+                // console.log('Warning:', name, 'not in incoming but batch dir');
                 callback(undefined);
               }
             });
@@ -916,9 +912,11 @@ exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
   var buildlist;
   try {
     buildlist = clone(pkgs).map(function(pkg) {
-      pkg.deps = parseDependencies(pkg.name, pkg.deps);
-      if(isObject(pkg.deps))
+      if(!isArray(pkg.deps)) {
+        pkg.deps = parseDependencies(pkg.name, pkg.deps);
+        if(isObject(pkg.deps))
           throw pkg.deps;
+      }
       return pkg;
     });
   } catch(e) {
@@ -932,7 +930,8 @@ exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
       break;
     case 1: // dep
       console.log('Generating dependency list, but skipping repo');
-      var list = sort(depdel(false, buildlist), builder);
+      var del = depdel(buildlist)
+      var list = sort(del, builder);
       if(!list) callback({message: 'dependency cycle'}, []);
       else callback(false, list);
       break;
@@ -945,7 +944,7 @@ exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
           return;
         }
         buildlist = getRebuildPkgs(repopkgs, buildlist);
-        var del = depdel(mode==3 ? true : false, buildlist);
+        var del = depdel(buildlist);
         var list = sort(del, builder);
         if(!list) callback({message: 'dependency cycle'}, []);
         else callback(false, list);
@@ -954,22 +953,18 @@ exports.Builder.prototype.getBuildList = function (mode, dist, pkgs, callback) {
   }
 }
 
-exports.Builder.prototype.showPackages = function (depssave, list, callback) {
+exports.Builder.prototype.showPackages = function (list, callback) {
   list.forEach(function(pkg) {
-    var deps;
-    if(depssave) deps = pkg.depssave;
-    else deps = pkg.deps;
-    
     var str = pkg.name+' '+pkg.version+' - [';
-    if(deps.length > 0) {
-      if(deps[0].length > 0) {
-        if(deps[0][0].version)
-          str += deps[0][0].name+" ("+deps[0][0].op+" "+deps[0][0].version+")";
+    if(pkg.deps.length > 0) {
+      if(pkg.deps[0].length > 0) {
+        if(pkg.deps[0][0].version)
+          str += pkg.deps[0][0].name+" ("+pkg.deps[0][0].op+" "+pkg.deps[0][0].version+")";
         else
-          str += deps[0][0].name;
+          str += pkg.deps[0][0].name;
       }
-      if(deps[0].length > 1) {
-        deps[0].slice(1).forEach(function(alt) {
+      if(pkg.deps[0].length > 1) {
+        pkg.deps[0].slice(1).forEach(function(alt) {
           if(alt.version)
             str += '|'+alt.name+" ("+alt.op+" "+alt.version+")";
           else
@@ -977,8 +972,8 @@ exports.Builder.prototype.showPackages = function (depssave, list, callback) {
         });
       }
     }
-    if(deps.length > 1) {
-      deps.slice(1).forEach(function(dep) {  
+    if(pkg.deps.length > 1) {
+      pkg.deps.slice(1).forEach(function(dep) {  
         str += ', ';
         if(dep.length > 0) {
           if(dep[0].version)
@@ -1009,10 +1004,20 @@ function getRepoPkgs(dist, repoDir, arch, callback) {
       return;
     }
     console.log('parse packages and dependencies');
-    var name, version, repo = [], deps = [], bins = [], gotpkg = false;
+    var name, fname, farch, version, repo = [], deps = [], bins = [], gotpkg = false;
     try {
       data.split('\n').forEach(function(line) {
         if(gotpkg && line.match(/^[ ]*$/)) {
+          var dsc = findDSC(name, fname, farch, dist, version, repoDir);
+          if(isObject(dsc))
+            throw dsc;
+          Fs.readFileSync(dsc, 'utf8').split('\n').forEach(function(line) {
+            if(line.match(/^Build-Depends: (.*)$/)) {
+              deps = parseDependencies(name, RegExp['$1']);
+              if(isObject(deps))
+                throw deps;
+            }
+          });
           repo.push({name: name, version: version, deps: deps, bins: bins, newpkg: false});
           gotpkg = false;
           return;
@@ -1021,15 +1026,9 @@ function getRepoPkgs(dist, repoDir, arch, callback) {
         switch(RegExp['$1']) {
           case 'Package': name = RegExp['$2']; gotpkg = true; break;
           case 'Version': version = RegExp['$2']; gotpkg = true; break;
-          case 'Depends':
-              deps = parseDependencies(name, RegExp['$2']);
-              if(isObject(deps)) {
-                throw(deps);
-              } else {
-                gotpkg = true;
-                break;
-              }
-          case 'Binary':  bins = RegExp['$2'].split(', '); gotpkg = true; break;
+          case 'Architecture': farch = RegExp['$2']; gotpkg = true; break;
+          case 'Filename': fname = RegExp['$2']; gotpkg = true; break;
+          case 'Binary': bins = RegExp['$2'].split(', '); gotpkg = true; break;
         }
       });
       callback(false, repo);
@@ -1039,20 +1038,64 @@ function getRepoPkgs(dist, repoDir, arch, callback) {
   });
 }
 
+function findDSC(name, fname, farch, dist, version, repoDir) {
+  var path = Path.join(repoDir, 'pool', 'main', name.substr(0, 1), name);
+  var dsc = Path.join(path, name+"_"+version+".dsc");
+  if(Path.existsSync(dsc))
+    return dsc;
+  dsc = Path.join(path, name+"_"+version.replace(/[^:]*:/, "")+".dsc");
+  if(Path.exists(dsc))
+    return dsc;
+  dsc = Path.join(repoDir, fname.replace(new RegExp("_"+farch+".deb"), ".dsc"));
+  if(Path.exists(dsc))
+    return dsc;
+  dsc = false;
+  try {
+    Fs.readdirSync(path).forEach(function(file) {
+      if(file.match(/.*\.dsc$/)) {
+        if(file.search(version) || file.search(version.replace(/[^:]*:/, "")))
+          dsc = Path.join(path, file);
+      }
+    });
+  } catch(e) {}
+  if(dsc)
+    return dsc;
+  path = Path.join(repoDir, Path.dirname(fname));
+  try {
+    Fs.readdirSync(path).forEach(function(file) {
+      if(file.match(/.*\.dsc$/)) {
+        if(file.search(version) || file.search(version.replace(/[^:]*:/, "")))
+          dsc = Path.join(path, file);
+      }
+    });
+  } catch(e) {}
+  if(dsc)
+    return dsc;
+  return {message: "Error: dsc for "+name+" not found"};
+}
+
 function getRebuildPkgs(repo, buildlist) {
   console.log('add successive packages to buildlist with dependencies in buildlist');
+  // remove repopkgs which are in buildlist
+  repo = repo.filter(function(repopkg) {
+    var found = false;
+    buildlist.every(function(pkg) {
+      if(pkg.name == repopkg.name) {
+        console.log(pkg.name, 'rebuild');
+        found = true;
+        return false;
+      }
+      return true;
+    });
+    return !found;
+  });
   var depfound = true, error = false;
   while(depfound) {
     depfound = false;
+    // check whether pkg is dep of repopkg
     repo = repo.filter(function(repopkg) {
       var found = false;
       buildlist.every(function(pkg) {
-        if(pkg.name == repopkg.name) {
-          console.log(pkg.name, 'already in repo');
-          found = true;
-          return false;
-        }
-        // check whether pkg is dep of repopkg
         groupDependencies(repopkg.deps).every(function(dep) {
           if(dep.name == pkg.name) {
             var cmds = dep.rules.map(function(rule) {
@@ -1108,11 +1151,11 @@ function groupDependencies(deps) {
 // "" -> {name: "", op: "", version: ""} | false
 
 function parseDependency(string) {
-  if(string.match(/^[ ]*([^ ]+)[ ]*\([ ]*(<<|<|<=|=|>=|>|>>)[ ]*([^ ]+)[ ]*\)[ ]*$/)) {
+  if(string.match(/^[ ]*([^ ]+)[ ]*(?:\[.*\])*[ ]*\([ ]*(<<|<|<=|=|>=|>|>>)[ ]*([^ ]+)[ ]*\)[ ]*(?:\[.*\])*[ ]*$/)) {
     var r1 = RegExp['$1'], r2 = RegExp['$2'], r3 = RegExp['$3'];
     return {name: r1, op: r2, version: r3};
   }
-  if(string.match(/^[ ]*([^ \(]+)[ ]*$/)) {
+  if(string.match(/^[ ]*([^ \(]+)[ ]*(?:\[.*\])*[ ]*$/)) {
     var r1 = RegExp['$1'];
     return {name: r1, op: "", version: ""};
   }
@@ -1135,7 +1178,7 @@ function parseDependencies(pkgname, string) {
             last = alt.name;
             continue;
           } else {
-            throw(r1);
+            throw r1;
           }
         }
         var alt = parseDependency(dep);
@@ -1143,26 +1186,36 @@ function parseDependencies(pkgname, string) {
           alts.push(alt);
           break;
         } else {
-          throw(dep);
+          throw dep;
         }
       }
       return alts;
     });
   } catch(e) {
+      console.log(string);
     return {message: 'Error: Malformed dependency for package '+pkgname+': '+e};
   }
 }
 
-function depdel(depssave, buildlist) {
+function depdel(buildlist) {
   console.log('delete dependencies which are not in buildlist');
   return buildlist.map(function(pkg) {
     pkg.deps = pkg.deps.filter(function(dep) {
       var alts = dep.filter(function(alt) {
         var found = false;
-        buildlist.every(function(pkg) {
-          if(alt.name == pkg.name) {
-            found = true;
-            return false;
+        buildlist.every(function(subpkg) {
+          if(alt.name == subpkg.name) {
+            if(!alt.version) {
+              found = true;
+              return false;
+            } else {
+              var cmd = compareStr(subpkg.version, alt.op, alt.version);
+              var res = syncExecs([cmd], "0");
+              if(res == "0") {
+                found = true;
+                return false;
+              }
+            }
           }
           return true;
         });
@@ -1170,20 +1223,22 @@ function depdel(depssave, buildlist) {
       });
       return alts.length > 0;
     });
-    if(depssave)
-        pkg.depssave = pkg.deps;
     return pkg;
   });
 }
 
 function sort(tmpbuildlist, builder) {
-  console.log('sort tmpbuildlist');
+  console.log('sort buildlist');
   var buildlist = [], removelist = [];
+  tmpbuildlist = tmpbuildlist.map(function(pkg) {
+    pkg.tmpdeps = pkg.deps;
+    return pkg;
+  });
   while(tmpbuildlist.length > 0) {
     var found = false;
     // collect all packages with no dependencies left
     tmpbuildlist = tmpbuildlist.filter(function(pkg) {
-      if(pkg.deps.length == 0) {
+      if(pkg.tmpdeps.length == 0) {
         buildlist.push(pkg);
         removelist.push(pkg);
         found = true;
@@ -1194,14 +1249,14 @@ function sort(tmpbuildlist, builder) {
     // if no package is found we've got a dependency cycle
     if(!found) {
       console.log('dependency cycle with');
-      builder.showPackages(false, tmpbuildlist, function(pkg, str) {
+      builder.showPackages(tmpbuildlist, function(pkg, str) {
         console.log('> '+str);
       });
       return false;
     }
     // remove collected packages from dependencies
     tmpbuildlist = tmpbuildlist.map(function(pkg) {
-      pkg.deps = pkg.deps.filter(function(dep) {
+      pkg.tmpdeps = pkg.tmpdeps.filter(function(dep) {
         var subfound = false;
         dep.every(function(alt) {
           removelist.every(function(rem) {
