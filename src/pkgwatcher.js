@@ -10,8 +10,9 @@ var FS      = require('fs'),
  */
 exports.watchDir = function (inputDir) {
   var emitter = new Events.EventEmitter;
+  var watcher = this;
   FS.watch(inputDir, function(evt, name) {
-    if(name && evt == "rename") {
+    if(name) {
       if(Path.existsSync(Path.join(inputDir, name)))
         handleFSEvent(inputDir, name, emitter);
     }
@@ -30,9 +31,9 @@ function handleFSEvent (inputDir, name, emitter) {
 
     switch (Path.extname(name)) {
       case '.dsc':
-	    dscFileComponents(path, function (err, comps) {
+        dscFileComponents(path, function (err, comps) {
           if(err) console.log(err.message);
-	      currentPackages[name] = comps;
+          currentPackages[name] = comps;
           processPackages(inputDir, currentPackages, emitter);
         });
         break;
@@ -54,7 +55,10 @@ function handleFSEvent (inputDir, name, emitter) {
 function processPackages (inputDir, packages, emitter) {
   for (var dsc in packages) {
     var pkgReady = packages[dsc].files.every(function (f) {
-      return Path.existsSync(Path.join(inputDir, f.file))
+      var file = Path.join(inputDir, f.file);
+      if(Path.existsSync(file))
+        return FS.statSync(file).size == f.size;
+      return false;
     });
     if (pkgReady) {
       emitter.emit('package', packages[dsc]);
@@ -64,39 +68,41 @@ function processPackages (inputDir, packages, emitter) {
 }
 
 function dscFileComponents (file, callback) {
-  FS.readFile(file, 'utf8', function (err, content) {
-    if(err) {
-      callback(err, undefined);
-      return;
-    }
-    
-    var filename = Path.basename(file);
-    filename.match(/^([^_]+)_(.*)\.dsc$/);
-    var pkgObj = { files: [], deps: [], bins: [], arch: "", name: RegExp['$1'], filename: filename, version: RegExp['$2'] };
-    var lines = content.split('\n');
-    var inFileSection = false;
-
-    lines.forEach(function (line) {
-      if (line.match(/^Build-Depends: (.*)$/)) {
-	    pkgObj.deps = RegExp['$1'];
+  setTimeout(function() {
+    FS.readFile(file, 'utf8', function (err, content) {
+      if(err) {
+        callback(err, undefined);
+        return;
       }
-      else if (line.match(/^Binary: (.*)$/)) {
-	    pkgObj.bins = RegExp['$1'].split(', ');
-      }
-      else if (line.match(/^Files: *$/)) {
-	    inFileSection = true;
-      }
-      else if (inFileSection && line.match(/^ +[0-9a-f]{32} ([0-9]+) (.*) *$/)) {
-        var size = parseInt(RegExp['$1']), name = RegExp['$2'];
-        pkgObj.files.push({file: name, size: size});
-      }
-      else if (inFileSection && line.match('/^\S')) {
-	    inFileSection = false;
-      }
+      
+      var filename = Path.basename(file);
+      filename.match(/^([^_]+)_(.*)\.dsc$/);
+      var pkgObj = { files: [], deps: [], bins: [], arch: "", name: RegExp['$1'], filename: filename, version: RegExp['$2'] };
+      var lines = content.split('\n');
+      var inFileSection = false;
+  
+      lines.forEach(function (line) {
+        if (line.match(/^Build-Depends: (.*)$/)) {
+          pkgObj.deps = RegExp['$1'];
+        }
+        else if (line.match(/^Binary: (.*)$/)) {
+          pkgObj.bins = RegExp['$1'].split(', ');
+        }
+        else if (line.match(/^Files: *$/)) {
+          inFileSection = true;
+        }
+        else if (inFileSection && line.match(/^ +[0-9a-f]{32} ([0-9]+) (.*) *$/)) {
+          var size = parseInt(RegExp['$1']), name = RegExp['$2'];
+          pkgObj.files.push({file: name, size: size});
+        }
+        else if (inFileSection && line.match('/^\S')) {
+          inFileSection = false;
+        }
+      });
+      
+      callback(undefined, pkgObj);
     });
-    
-    callback(undefined, pkgObj);
-  });
+  }, 500);
 }
 
 exports.analyzeDSC = function (file, callback) {

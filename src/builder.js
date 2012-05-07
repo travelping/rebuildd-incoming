@@ -1192,7 +1192,6 @@ function parseDependencies(pkgname, string) {
       return alts;
     });
   } catch(e) {
-      console.log(string);
     return {message: 'Error: Malformed dependency for package '+pkgname+': '+e};
   }
 }
