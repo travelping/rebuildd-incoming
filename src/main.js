@@ -280,8 +280,9 @@ function cli(data, callback) {
       }
       waitprompt = true;
       error = undefined;
+      var packet = builder.getPacketNum();
       As.forEachSeries(build_dists, function(dist, callback1) {
-        builder.init(dist, dep, processList, function(err) {
+        builder.init(dist, dep, processList, packet, function(err) {
           parseRet(err, dist+': ', callback);
           error = err;
           callback1(undefined);
@@ -305,7 +306,16 @@ function cli(data, callback) {
         break;
       }
       waitprompt = true;
-      builder.cont(cmd[1], processList, function(err) {
+      var ids = [];
+      cmd[1].split(',').forEach(function(num) {
+        if(num.substr(0, 1) == 'p')
+          builder.getBatchIds(num.substr(1)).forEach(function(id) {
+            ids.push(id);
+          });
+        else
+          ids.push(num);
+      });
+      builder.cont(ids, processList, function(err) {
         parseRet(err, '', callback);
         if(!err) {
           builder.cleanIncoming(processList, function(err) {
@@ -325,7 +335,16 @@ function cli(data, callback) {
         break;
       }
       waitprompt = true;
-      builder.stop(cmd[1], function(err) {
+      var ids = [];
+      cmd[1].split(',').forEach(function(num) {
+        if(num.substr(0, 1) == 'p')
+          builder.getBatchIds(num.substr(1)).forEach(function(id) {
+            ids.push(id);
+          });
+        else
+          ids.push(num);
+      });
+      builder.stop(ids, function(err) {
         if(err) callback(err.message+'\n');
         else callback('stopped\n');
         callback('> ');
@@ -337,7 +356,16 @@ function cli(data, callback) {
         break;
       }
       waitprompt = true;
-      builder.cancel(cmd[1], function(err) {
+      var ids = [];
+      cmd[1].split(',').forEach(function(num) {
+        if(num.substr(0, 1) == 'p')
+          builder.getBatchIds(num.substr(1)).forEach(function(id) {
+            ids.push(id);
+          });
+        else
+          ids.push(num);
+      });
+      builder.cancel(ids, function(err) {
         if(err) callback(err.message+'\n');
         else callback('canceled\n');
         callback('> ');
@@ -381,7 +409,7 @@ function cli(data, callback) {
         var dist = batch.dist+genChars(distlen-batch.dist.length, ' ');
         var mode = modes[batch.mode];
         if(mode.length < 4) mode += '\t';
-        callback(batch.id+'\t'+dist+mode+'\t'+batch.status);
+        callback('p'+batch.packet+':'+batch.id+'\t'+dist+mode+'\t'+batch.status);
         callback('\t'+batch.list.length+'\t'+name+'\n');
       });
       break;
@@ -396,8 +424,8 @@ function cli(data, callback) {
       callback('      dep     all|<dist[,dist..]> - build in right order\n');
       callback('      rebuild all|<dist[,dist..]> - build new and rebuild paternal\n');
       callback('stop <id>                         - temporarily stop batch (and switch to next waiting)\n');
-      callback('cancel <id>                       - delete batch (and switch to next waiting)\n');
-      callback('continue <id>                     - merge selected new packages into batch and continue stopped/failed batch\n');
+      callback('cancel <id[,id..]>                - delete batch (and switch to next waiting)\n');
+      callback('continue <id[,id..]>              - merge selected new packages into batch and continue stopped/failed batch\n');
       callback('deps                              - list packages to be rebuild\n');
       callback('reset                             - clears queues, recover batches, unlock builder, rereads incoming dir\n');
       callback('status                            - status about current batches\n');
