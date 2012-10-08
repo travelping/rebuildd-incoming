@@ -400,7 +400,7 @@ exports.Builder.prototype.linkBatch = function(batch, callback) {
 
 exports.Builder.prototype.updateBatch = function (batch, callback) {
   var info = Path.join(batch.dir, 'info');
-  Fs.writeFile(info, batch.dist+'\n'+batch.status+'\n'+batch.mode, callback);
+  Fs.writeFile(info, batch.dist+'\n'+batch.status+'\n'+batch.mode+'\n'+batch.packet, callback);
 }
 
 exports.Builder.prototype.startBatch = function (batch, callbackFin) {
